@@ -142,7 +142,7 @@ pub struct GoRequest {
 
 /// Denotes the type of an information request from a client.
 #[repr(u16)]
-#[derive(Clone, Copy, Debug, PartialEq, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
 pub enum InfoType {
     Export = NBD_INFO_EXPORT,
     Name = NBD_INFO_NAME,
@@ -491,7 +491,7 @@ impl fmt::Display for Error {
 }
 
 #[cfg(test)]
-mod tests {
+mod valid_tests {
     use super::*;
 
     macro_rules! frame_tests {
@@ -608,6 +608,35 @@ mod tests {
                 )],
                 unknown: vec![0xff],
             },
+        ),
+    }
+}
+
+#[cfg(test)]
+mod invalid_tests {
+    use super::*;
+
+    macro_rules! frame_incomplete_tests {
+        ($($name:ident: $type:path: $value:expr,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let (buf, frame_type) = $value;
+                let mut src = io::Cursor::new(&buf[..]);
+
+                let err = Frame::check(&mut src, &frame_type).expect_err("frame check succeeded");
+
+                assert!(matches!(err, Error::Incomplete), "expected Error::Incomplete, but got: {:?}", err);
+            }
+        )*
+        }
+    }
+
+    frame_incomplete_tests! {
+        client_flags_short: Frame::ClientFlags: ([0u8; 3], FrameType::ClientFlags),
+        client_options_short: Frame::ClientOptions: (
+            [b'I', b'H', b'A', b'V', b'E', b'O', b'P'],
+            FrameType::ClientOptions,
         ),
     }
 }
