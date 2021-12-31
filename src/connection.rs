@@ -83,13 +83,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 /// A low level NBD connection type which deals with reading and writing
 /// `Frames` rather than high-level operations.
 struct RawConnection<S> {
-    pub(crate) stream: BufWriter<S>,
-    pub(crate) buffer: BytesMut,
+    stream: BufWriter<S>,
+    buffer: BytesMut,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     /// Creates an NBD server connection from `stream`.
-    pub(crate) fn new(stream: S) -> Self {
+    fn new(stream: S) -> Self {
         RawConnection {
             stream: BufWriter::new(stream),
             buffer: BytesMut::with_capacity(8 * 1024),
@@ -98,7 +98,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 
     /// Reads a single `Frame` of the specified `FrameType` from the underlying
     /// stream.
-    pub async fn read_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
+    async fn read_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
         loop {
             if let Some(frame) = self.parse_frame(&frame_type)? {
                 // We read enough data to parse an entire frame, return it now.
