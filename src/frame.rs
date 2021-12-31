@@ -57,7 +57,7 @@ bitflags! {
 
 /// Options sent by the client which are parsed as either known or unknown
 /// depending on the server's capabilities.
-#[derive(Debug)]
+#[derive(Debug, Default, PartialEq)]
 pub struct ClientOptions {
     pub known: Vec<(OptionRequestCode, OptionRequest)>,
     pub unknown: Vec<u32>,
@@ -75,13 +75,13 @@ pub struct Export {
 
 /// Denotes the type of known options which can be handled by the server.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
 pub enum OptionRequestCode {
     Go = NBD_OPT_GO,
 }
 
 /// The contents of known options which can be handled by the server.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum OptionRequest {
     Go(GoRequest),
 }
@@ -134,7 +134,7 @@ impl OptionRequest {
 }
 
 /// Data parsed from a Go option.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct GoRequest {
     pub name: Option<String>,
     pub info_requests: Vec<InfoType>,
@@ -142,7 +142,7 @@ pub struct GoRequest {
 
 /// Denotes the type of an information request from a client.
 #[repr(u16)]
-#[derive(Clone, Copy, Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, FromPrimitive)]
 pub enum InfoType {
     Export = NBD_INFO_EXPORT,
     Name = NBD_INFO_NAME,
@@ -426,5 +426,127 @@ impl fmt::Display for Error {
             Error::Incomplete => "stream ended early".fmt(fmt),
             Error::Other(err) => err.fmt(fmt),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! frame_tests {
+        ($($name:ident: $type:path: $value:expr,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let (buf, frame_type, want) = $value;
+                let mut src = io::Cursor::new(&buf[..]);
+
+                Frame::check(&mut src, &frame_type).expect("failed to check frame");
+                src.set_position(0);
+
+                let got = match Frame::parse(&mut src, &frame_type).expect("failed to parse frame") {
+                    $type(v) => v,
+                    frame => panic!("expected a {:?} frame, but got: {:?}", frame_type, frame),
+                };
+
+                assert!(want.eq(&got), "unexpected {:?} frame contents:\nwant: {:?}\n got: {:?}", frame_type, want, got);
+            }
+        )*
+        }
+    }
+
+    frame_tests! {
+        client_flags_empty: Frame::ClientFlags: (
+            [0u8; 4], FrameType::ClientFlags, ClientFlags::empty(),
+        ),
+
+        client_flags_all: Frame::ClientFlags: (
+            [0, 0, 0, 1 | 2],
+            FrameType::ClientFlags,
+            ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
+        ),
+
+        client_options_go_minimal: Frame::ClientOptions: (
+            [
+                // ClientOptions
+                //
+                // Magic
+                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
+                // Go
+                0, 0, 0, 7,
+                // Go length
+                0, 0, 0, 6,
+
+                // GoRequest
+                //
+                // Name length
+                0, 0, 0, 0,
+                // Number of info requests
+                0, 0,
+            ],
+            FrameType::ClientOptions,
+            ClientOptions{
+                known: vec![(
+                    OptionRequestCode::Go,
+                    OptionRequest::Go(GoRequest{
+                        name: None,
+                        info_requests: vec![InfoType::Export],
+                    }),
+                )],
+                unknown: vec![],
+            },
+        ),
+
+        client_options_go_full: Frame::ClientOptions: (
+            [
+                // Magic
+                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
+                // Go
+                0, 0, 0, 7,
+                // Go length
+                0, 0, 0, 18,
+
+                // GoRequest
+                //
+                // Name length + name
+                0, 0, 0, 4,
+                b't', b'e', b's', b't',
+                // Number of info requests
+                0, 4,
+                // Export
+                0, 0,
+                // Name
+                0, 1,
+                // Description
+                0, 2,
+                // Block size
+                0, 3,
+
+                // Magic
+                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
+                // Unknown
+                0, 0, 0, 0xff,
+                // Unknown length + bytes
+                0, 0, 0, 4,
+                0xff, 0xff, 0xff, 0xff,
+
+            ],
+            FrameType::ClientOptions,
+            ClientOptions{
+                known: vec![(
+                    OptionRequestCode::Go,
+                    OptionRequest::Go(GoRequest{
+                        name: Some("test".to_string()),
+                        info_requests: vec![
+                            InfoType::Export,
+                            InfoType::Name,
+                            InfoType::Description,
+                            InfoType::BlockSize,
+                        ],
+                    }),
+                )],
+                unknown: vec![0xff],
+            },
+        ),
     }
 }
