@@ -490,7 +490,7 @@ impl fmt::Display for Error {
 mod valid_tests {
     use super::*;
 
-    macro_rules! frame_tests {
+    macro_rules! frame_read_tests {
         ($($name:ident: $type:path: $value:expr,)*) => {
         $(
             #[test]
@@ -512,7 +512,7 @@ mod valid_tests {
         }
     }
 
-    frame_tests! {
+    frame_read_tests! {
         client_flags_empty: Frame::ClientFlags: (
             [0u8; 4], FrameType::ClientFlags, ClientFlags::empty(),
         ),
@@ -604,6 +604,47 @@ mod valid_tests {
                 )],
                 unknown: vec![0xff],
             },
+        ),
+    }
+
+    macro_rules! frame_write_tests {
+        ($($name:ident: $value:expr,)*) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                let (frame, want) = $value;
+                let frame_msg = format!("{:?}", frame);
+
+                let mut got = vec![];
+                frame.write(&mut got).await.expect("failed to write frame");
+
+                assert_eq!(
+                    &want[..],
+                    &got[..],
+                    "unexpected frame bytes for {}",
+                    frame_msg
+                );
+            }
+        )*
+        }
+    }
+
+    frame_write_tests! {
+        server_handshake_empty: (
+            Frame::ServerHandshake(HandshakeFlags::empty()),
+            [
+                b'N', b'B', b'D', b'M', b'A', b'G', b'I', b'C',
+                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
+                0, 0,
+            ],
+        ),
+        server_handshake_full: (
+            Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
+            [
+                b'N', b'B', b'D', b'M', b'A', b'G', b'I', b'C',
+                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
+                0, 1 | 2,
+            ],
         ),
     }
 }
