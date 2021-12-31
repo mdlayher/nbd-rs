@@ -2,6 +2,7 @@ use bitflags::bitflags;
 use bytes::Buf;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
+use std::cmp::max;
 use std::fmt;
 use std::io::{self, Read};
 use std::num::TryFromIntError;
@@ -101,7 +102,10 @@ impl OptionRequest {
         };
 
         let num_infos = get_u16(src)? as usize;
-        let mut info_requests = Vec::with_capacity(num_infos);
+
+        // Allocate enough space for the single export info (in the case of no
+        // requested options) or enough for each requested option.
+        let mut info_requests = Vec::with_capacity(max(1, num_infos));
         for _ in 0..num_infos {
             let raw = get_u16(src)?;
             let info = FromPrimitive::from_u16(raw)
