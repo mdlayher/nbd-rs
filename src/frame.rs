@@ -26,7 +26,7 @@ pub enum Frame {
 /// Denotes the expected type of a Frame without knowledge of its associated
 /// data.
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum FrameType {
     ClientFlags,
     ClientOptions,
@@ -251,11 +251,7 @@ impl Frame {
             // TODO(mdlayher): implement client as well.
             FrameType::ServerHandshake
             | FrameType::ServerOptions
-            | FrameType::ServerUnsupportedOptions => Err(format!(
-                "protocol error; check: unhandled frame type {:?}",
-                frame_type
-            )
-            .into()),
+            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(*frame_type)),
         }
     }
 
@@ -287,11 +283,7 @@ impl Frame {
             // TODO(mdlayher): implement client as well.
             FrameType::ServerHandshake
             | FrameType::ServerOptions
-            | FrameType::ServerUnsupportedOptions => Err(format!(
-                "protocol error; parse: unhandled frame type {:?}",
-                frame_type
-            )
-            .into()),
+            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(*frame_type)),
         }
     }
 
@@ -440,6 +432,9 @@ pub enum Error {
     /// an entire Frame.
     Incomplete,
 
+    /// A sentinel which indicates that parsing this frame type is unsupported.
+    Unsupported(FrameType),
+
     Other(crate::Error),
 }
 
@@ -485,6 +480,7 @@ impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Incomplete => "stream ended early".fmt(fmt),
+            Error::Unsupported(ft) => write!(fmt, "frame type {:?} is not supported", ft),
             Error::Other(err) => err.fmt(fmt),
         }
     }
@@ -638,5 +634,25 @@ mod invalid_tests {
             [b'I', b'H', b'A', b'V', b'E', b'O', b'P'],
             FrameType::ClientOptions,
         ),
+    }
+
+    #[test]
+    fn frames_unsupported() {
+        let types = [
+            FrameType::ServerHandshake,
+            FrameType::ServerOptions,
+            FrameType::ServerUnsupportedOptions,
+        ];
+
+        for ft in &types {
+            let err =
+                Frame::check(&mut io::Cursor::default(), ft).expect_err("cursor should be empty");
+
+            assert!(
+                matches!(err, Error::Unsupported(_)),
+                "expected unsupported frame type for {:?}",
+                ft,
+            );
+        }
     }
 }
