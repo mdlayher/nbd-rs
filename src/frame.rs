@@ -7,7 +7,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
-use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::consts::*;
 
@@ -151,13 +151,13 @@ pub enum InfoType {
 }
 
 impl GoRequest {
-    /// Writes the reply to a `GoRequest` to `s`.
+    /// Writes the reply to a `GoRequest` to `dst`.
     ///
     /// # Panics
     /// At least one value must be present in `info_requests`.
-    pub async fn reply<W: AsyncWrite + Unpin>(
+    pub async fn reply<S: AsyncWrite + Unpin>(
         &self,
-        s: &mut BufWriter<W>,
+        dst: &mut S,
         export: &Export,
     ) -> io::Result<()> {
         // We always send export info at a minimum.
@@ -168,39 +168,41 @@ impl GoRequest {
 
         for info in &self.info_requests {
             // Each info request reply is prefixed with magic and the Go code.
-            s.write_u64(REPLYMAGIC).await?;
-            s.write_u32(OptionRequestCode::Go as u32).await?;
+            dst.write_u64(REPLYMAGIC).await?;
+            dst.write_u32(OptionRequestCode::Go as u32).await?;
 
             match *info {
                 InfoType::Export => {
                     // Fixed size of 10 bytes for export info.
-                    s.write_u32(NBD_REP_INFO).await?;
-                    s.write_u32(2 + 8 + 2).await?;
+                    dst.write_u32(NBD_REP_INFO).await?;
+                    dst.write_u32(2 + 8 + 2).await?;
 
                     // Export info type, export size.
-                    s.write_u16(*info as u16).await?;
-                    s.write_u64(export.size).await?;
+                    dst.write_u16(*info as u16).await?;
+                    dst.write_u64(export.size).await?;
 
                     // Always set flags, optionally mark read-only.
                     let mut flags = TransmissionFlags::HAS_FLAGS;
                     if export.readonly {
                         flags |= TransmissionFlags::READ_ONLY;
                     }
-                    s.write_u16(flags.bits()).await?;
+                    dst.write_u16(flags.bits()).await?;
                 }
-                InfoType::Name => Self::reply_string(s, *info, &export.name).await?,
-                InfoType::Description => Self::reply_string(s, *info, &export.description).await?,
+                InfoType::Name => Self::reply_string(dst, *info, &export.name).await?,
+                InfoType::Description => {
+                    Self::reply_string(dst, *info, &export.description).await?
+                }
                 InfoType::BlockSize => {
                     // Fixed size of 14 bytes for block size.
-                    s.write_u32(NBD_REP_INFO).await?;
-                    s.write_u32(2 + (4 * 3)).await?;
-                    s.write_u16(*info as u16).await?;
+                    dst.write_u32(NBD_REP_INFO).await?;
+                    dst.write_u32(2 + (4 * 3)).await?;
+                    dst.write_u16(*info as u16).await?;
 
                     // TODO(mdlayher): break out minimum/preferred/maximum into
                     // export fields? For now we specify the same value for
                     // each.
                     for _ in 0..3 {
-                        s.write_u32(export.block_size).await?;
+                        dst.write_u32(export.block_size).await?;
                     }
                 }
             }
@@ -209,20 +211,20 @@ impl GoRequest {
         Ok(())
     }
 
-    /// Writes a string and its associated `InfoType` to `s`.
-    async fn reply_string<W: AsyncWrite + Unpin>(
-        s: &mut BufWriter<W>,
+    /// Writes a string and its associated `InfoType` to `dst`.
+    async fn reply_string<S: AsyncWrite + Unpin>(
+        dst: &mut S,
         info_type: InfoType,
         string: &str,
     ) -> io::Result<()> {
-        s.write_u32(NBD_REP_INFO).await?;
+        dst.write_u32(NBD_REP_INFO).await?;
 
         // Add two bytes for length field.
         let length = string.len() as u32 + 2;
 
-        s.write_u32(length).await?;
-        s.write_u16(info_type as u16).await?;
-        s.write_all(string.as_bytes()).await?;
+        dst.write_u32(length).await?;
+        dst.write_u16(info_type as u16).await?;
+        dst.write_all(string.as_bytes()).await?;
 
         Ok(())
     }
@@ -291,6 +293,65 @@ impl Frame {
             )
             .into()),
         }
+    }
+
+    /// Consumes the current `Frame` and writes it out to `dst`. It returns
+    /// `Some(())` if any bytes were written to the stream or `None` if not.
+    pub async fn write<S: AsyncWrite + Unpin>(self, dst: &mut S) -> io::Result<Option<()>> {
+        match self {
+            Frame::ServerHandshake(flags) => {
+                // Opening handshake and server flags.
+                dst.write_u64(NBDMAGIC).await?;
+                dst.write_u64(IHAVEOPT).await?;
+                dst.write_u16(flags.bits()).await?;
+            }
+            Frame::ServerOptions(export, options) => {
+                if options.is_empty() {
+                    // Noop, nothing to write.
+                    return Ok(None);
+                }
+
+                // Iterate through each valid option and reply to them.
+                for (code, option) in &options {
+                    match option {
+                        OptionRequest::Go(req) => req.reply(dst, &export).await?,
+                    }
+
+                    // Acknowledge the option was processed.
+                    dst.write_u64(REPLYMAGIC).await?;
+                    dst.write_u32(*code as u32).await?;
+                    dst.write_u32(NBD_REP_ACK).await?;
+                    dst.write_u32(0).await?;
+                }
+            }
+            Frame::ServerUnsupportedOptions(options) => {
+                if options.is_empty() {
+                    // Noop, nothing to write.
+                    return Ok(None);
+                }
+
+                // These options are unsupported, return a textual error and the
+                // unsupported error code.
+                for option in &options {
+                    dst.write_u64(REPLYMAGIC).await?;
+                    dst.write_u32(*option).await?;
+
+                    let error = format!("the server does not support this option: {}", option);
+
+                    dst.write_u32(NBD_REP_ERR_UNSUP).await?;
+                    dst.write_u32(error.len() as u32).await?;
+                    dst.write_all(error.as_bytes()).await?;
+                }
+            }
+
+            // Options sent by Client.
+            //
+            // TODO(mdlayher): implement client as well.
+            Frame::ClientFlags(_) | Frame::ClientOptions(_) => unimplemented!(),
+        }
+
+        // Wrote some data.
+        Ok(Some(()))
     }
 }
 

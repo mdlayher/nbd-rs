@@ -2,7 +2,6 @@ use bytes::{Buf, BytesMut};
 use std::io::{self, Cursor};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
-use crate::consts::*;
 use crate::frame::{self, *};
 
 /// A high-level Network Block Device (NBD) server connection.
@@ -121,55 +120,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 
     /// Write a single `Frame` value to the underlying stream.
     async fn write_frame(&mut self, frame: Frame) -> io::Result<()> {
-        match frame {
-            Frame::ServerHandshake(flags) => {
-                // Opening handshake and server flags.
-                self.stream.write_u64(NBDMAGIC).await?;
-                self.stream.write_u64(IHAVEOPT).await?;
-                self.stream.write_u16(flags.bits()).await?;
-            }
-            Frame::ServerOptions(export, options) => {
-                // Iterate through each valid option and reply to them.
-                for (code, option) in &options {
-                    match option {
-                        OptionRequest::Go(req) => req.reply(&mut self.stream, &export).await?,
-                    }
-
-                    // Acknowledge the option was processed.
-                    self.stream.write_u64(REPLYMAGIC).await?;
-                    self.stream.write_u32(*code as u32).await?;
-                    self.stream.write_u32(NBD_REP_ACK).await?;
-                    self.stream.write_u32(0).await?;
-                }
-            }
-            Frame::ServerUnsupportedOptions(options) => {
-                if options.is_empty() {
-                    // Noop, nothing to write or flush.
-                    return Ok(());
-                }
-
-                // These options are unsupported, return a textual error and the
-                // unsupported error code.
-                for option in &options {
-                    self.stream.write_u64(REPLYMAGIC).await?;
-                    self.stream.write_u32(*option).await?;
-
-                    let error = format!("the server does not support this option: {}", option);
-
-                    self.stream.write_u32(NBD_REP_ERR_UNSUP).await?;
-                    self.stream.write_u32(error.len() as u32).await?;
-                    self.stream.write_all(error.as_bytes()).await?;
-                }
-            }
-
-            // Options sent by Client.
-            //
-            // TODO(mdlayher): implement client as well.
-            Frame::ClientFlags(_) | Frame::ClientOptions(_) => unimplemented!(),
+        if frame.write(&mut self.stream).await?.is_some() {
+            // Wrote a frame, flush it now.
+            self.stream.flush().await
+        } else {
+            Ok(())
         }
-
-        // Wrote a frame, flush it now.
-        self.stream.flush().await
     }
 
     /// Try to parse a single `Frame` but also terminate early with an
