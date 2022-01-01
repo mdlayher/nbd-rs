@@ -7,6 +7,10 @@ pub const NBDMAGIC: u64 = 0x4e42444d41474943;
 pub const IHAVEOPT: u64 = 0x49484156454F5054;
 pub const REPLYMAGIC: u64 = 0x3e889045565a9;
 
+pub const NBDMAGIC_BUF: &[u8] = b"NBDMAGIC";
+pub const IHAVEOPT_BUF: &[u8] = b"IHAVEOPT";
+pub const REPLYMAGIC_BUF: &[u8] = &[0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9];
+
 pub const NBD_CMD_READ: u16 = 0;
 pub const NBD_CMD_WRITE: u16 = 1;
 pub const NBD_CMD_DISC: u16 = 2;

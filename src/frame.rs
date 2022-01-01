@@ -5,8 +5,6 @@ use num_traits::FromPrimitive;
 use std::cmp::max;
 use std::fmt;
 use std::io::{self, Read};
-use std::num::TryFromIntError;
-use std::string::FromUtf8Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::consts::*;
@@ -88,8 +86,9 @@ pub enum OptionRequest {
 
 impl OptionRequest {
     /// Produces an `OptionRequest(GoRequest)` from `src` after the client
-    /// option header has been consumed by `next_option`.
-    pub fn go(src: &mut io::Cursor<&[u8]>) -> Result<OptionRequest> {
+    /// option header has been consumed by `next_option` with the given
+    /// `frame_type`.
+    pub fn go(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<OptionRequest> {
         // Name may or may not be present.
         let name_length = get_u32(src)? as usize;
         let name = match name_length {
@@ -97,7 +96,7 @@ impl OptionRequest {
             _ => {
                 let mut name_buf = vec![0u8; name_length];
                 get_exact(src, &mut name_buf)?;
-                Some(String::from_utf8(name_buf)?)
+                Some(String::from_utf8(name_buf).map_err(|_err| Error::Protocol(frame_type))?)
             }
         };
 
@@ -108,8 +107,7 @@ impl OptionRequest {
         let mut info_requests = Vec::with_capacity(max(1, num_infos));
         for _ in 0..num_infos {
             let raw = get_u16(src)?;
-            let info = FromPrimitive::from_u16(raw)
-                .ok_or(format!("unrecognized info request value: {}", raw))?;
+            let info = FromPrimitive::from_u16(raw).ok_or(Error::Protocol(frame_type))?;
 
             info_requests.push(info);
         }
@@ -241,7 +239,7 @@ impl Frame {
             }
             FrameType::ClientOptions => {
                 while src.has_remaining() {
-                    next_option(src)?;
+                    next_option(src, frame_type)?;
                 }
 
                 Ok(())
@@ -260,7 +258,7 @@ impl Frame {
         match frame_type {
             FrameType::ClientFlags => {
                 let flags =
-                    ClientFlags::from_bits(get_u32(src)?).ok_or("client sent invalid flags")?;
+                    ClientFlags::from_bits(get_u32(src)?).ok_or(Error::Protocol(frame_type))?;
 
                 Ok(Frame::ClientFlags(flags))
             }
@@ -270,7 +268,7 @@ impl Frame {
                 while src.has_remaining() {
                     // Keep track of both known and unknown options so we can
                     // report errors to the client accordingly.
-                    match next_option(src)? {
+                    match next_option(src, frame_type)? {
                         ParsedOption::Known(option) => known.push(option),
                         ParsedOption::Unknown(code) => unknown.push(code),
                     }
@@ -399,10 +397,10 @@ enum ParsedOption {
 }
 
 // Produces the next `ParsedOption` value from `src` by consuming the client
-// option header and inner data.
-fn next_option(src: &mut io::Cursor<&[u8]>) -> Result<ParsedOption> {
+// option header and inner data for a given `frame_type`.
+fn next_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<ParsedOption> {
     if get_u64(src)? != IHAVEOPT {
-        return Err("client failed to send option magic".into());
+        return Err(Error::Protocol(frame_type));
     }
 
     let option_code = get_u32(src)?;
@@ -419,7 +417,7 @@ fn next_option(src: &mut io::Cursor<&[u8]>) -> Result<ParsedOption> {
     };
 
     let opt = match option {
-        OptionRequestCode::Go => OptionRequest::go(src)?,
+        OptionRequestCode::Go => OptionRequest::go(src, frame_type)?,
     };
 
     Ok(ParsedOption::Known((option, opt)))
@@ -432,8 +430,12 @@ pub enum Error {
     /// an entire Frame.
     Incomplete,
 
-    /// A sentinel which indicates that parsing this frame type is unsupported.
+    /// Indicates that parsing this frame type is unsupported.
     Unsupported(FrameType),
+
+    /// Indicates that the frame is supported but cannot be parsed due to a
+    /// protocol error, such as an incorrect magic number.
+    Protocol(FrameType),
 
     Other(crate::Error),
 }
@@ -462,18 +464,6 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<FromUtf8Error> for Error {
-    fn from(_src: FromUtf8Error) -> Error {
-        "protocol error; invalid frame format".into()
-    }
-}
-
-impl From<TryFromIntError> for Error {
-    fn from(_src: TryFromIntError) -> Error {
-        "protocol error; invalid frame format".into()
-    }
-}
-
 impl std::error::Error for Error {}
 
 impl fmt::Display for Error {
@@ -481,6 +471,11 @@ impl fmt::Display for Error {
         match self {
             Error::Incomplete => "stream ended early".fmt(fmt),
             Error::Unsupported(ft) => write!(fmt, "frame type {:?} is not supported", ft),
+            Error::Protocol(ft) => write!(
+                fmt,
+                "frame type {:?} could not be parsed due to protocol error",
+                ft
+            ),
             Error::Other(err) => err.fmt(fmt),
         }
     }
@@ -489,10 +484,6 @@ impl fmt::Display for Error {
 #[cfg(test)]
 mod valid_tests {
     use super::*;
-
-    const NBDMAGIC_BUF: &[u8] = b"NBDMAGIC";
-    const IHAVEOPT_BUF: &[u8] = b"IHAVEOPT";
-    const REPLYMAGIC_BUF: &[u8] = &[0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9];
 
     macro_rules! frame_read_tests {
         ($($name:ident: $type:path: $value:expr,)*) => {
@@ -706,11 +697,11 @@ mod invalid_tests {
     use super::*;
 
     macro_rules! frame_incomplete_tests {
-        ($($name:ident: $type:path: $value:expr,)*) => {
+        ($($name:ident: $value:expr,)*) => {
         $(
             #[test]
             fn $name() {
-                let (buf, frame_type) = $value;
+                let (frame_type, buf) = $value;
                 let mut src = io::Cursor::new(&buf[..]);
 
                 let err = Frame::check(&mut src, frame_type).expect_err("frame check succeeded");
@@ -722,10 +713,74 @@ mod invalid_tests {
     }
 
     frame_incomplete_tests! {
-        client_flags_short: Frame::ClientFlags: ([0u8; 3], FrameType::ClientFlags),
-        client_options_short: Frame::ClientOptions: (
-            [b'I', b'H', b'A', b'V', b'E', b'O', b'P'],
+        client_flags_short: (FrameType::ClientFlags, [0u8; 3]),
+        client_options_short: (FrameType::ClientOptions, b"IHAVEOP"),
+    }
+
+    macro_rules! frame_protocol_error_tests {
+        ($($name:ident: $value:expr,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let (frame_type, buf) = $value;
+                let mut src = io::Cursor::new(&buf[..]);
+
+                let err = Frame::parse(&mut src, frame_type).expect_err("frame parse succeeded");
+
+                assert!(matches!(err, Error::Protocol(_)), "expected Error::Protocol, but got: {:?}", err);
+            }
+        )*
+        }
+    }
+
+    frame_protocol_error_tests! {
+        client_flags_all: (FrameType::ClientFlags, [0xff, 0xff, 0xff, 0xff]),
+        client_options_magic: (FrameType::ClientOptions, b"deadbeef"),
+        client_options_go_utf8: (
             FrameType::ClientOptions,
+            [
+                // ClientOptions
+                //
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // Go length
+                    0, 0, 0, 7,
+
+                    // GoRequest
+                    //
+                    // Name length
+                    0, 0, 0, 4,
+                    // Name: bad UTF-8
+                    b't', b'e', b's', 0xff,
+                ],
+            ].concat(),
+        ),
+        client_options_go_info_request: (
+            FrameType::ClientOptions,
+            [
+                // ClientOptions
+                //
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // Go length
+                    0, 0, 0, 7,
+
+                    // GoRequest
+                    //
+                    // Name length
+                    0, 0, 0, 0,
+                    // Number of info requests
+                    0, 1,
+                    // Invalid info request
+                    0xff, 0xff,
+                ],
+            ].concat(),
         ),
     }
 
