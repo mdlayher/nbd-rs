@@ -211,6 +211,13 @@ mod tests {
                 .read_buf(&mut buf)
                 .await
                 .expect("failed to drain server handshake");
+
+            // Check the presence of server magic.
+            assert_eq!(
+                &buf[..8],
+                NBDMAGIC_BUF,
+                "unexpected server handshake magic value"
+            );
             buf.advance(n);
 
             // Send client flags.
