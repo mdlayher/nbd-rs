@@ -490,6 +490,9 @@ impl fmt::Display for Error {
 mod valid_tests {
     use super::*;
 
+    const NBDMAGIC_BUF: &[u8] = &[b'N', b'B', b'D', b'M', b'A', b'G', b'I', b'C'];
+    const IHAVEOPT_BUF: &[u8] = &[b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T'];
+
     macro_rules! frame_read_tests {
         ($($name:ident: $type:path: $value:expr,)*) => {
         $(
@@ -528,19 +531,21 @@ mod valid_tests {
                 // ClientOptions
                 //
                 // Magic
-                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
-                // Go
-                0, 0, 0, 7,
-                // Go length
-                0, 0, 0, 6,
+                IHAVEOPT_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // Go length
+                    0, 0, 0, 6,
 
-                // GoRequest
-                //
-                // Name length
-                0, 0, 0, 0,
-                // Number of info requests
-                0, 0,
-            ],
+                    // GoRequest
+                    //
+                    // Name length
+                    0, 0, 0, 0,
+                    // Number of info requests
+                    0, 0,
+                ],
+            ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
                 known: vec![(
@@ -557,37 +562,39 @@ mod valid_tests {
         client_options_go_full: Frame::ClientOptions: (
             [
                 // Magic
-                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
-                // Go
-                0, 0, 0, 7,
-                // Go length
-                0, 0, 0, 18,
+                IHAVEOPT_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // Go length
+                    0, 0, 0, 18,
 
-                // GoRequest
-                //
-                // Name length + name
-                0, 0, 0, 4,
-                b't', b'e', b's', b't',
-                // Number of info requests
-                0, 4,
-                // Export
-                0, 0,
-                // Name
-                0, 1,
-                // Description
-                0, 2,
-                // Block size
-                0, 3,
-
+                    // GoRequest
+                    //
+                    // Name length + name
+                    0, 0, 0, 4,
+                    b't', b'e', b's', b't',
+                    // Number of info requests
+                    0, 4,
+                    // Export
+                    0, 0,
+                    // Name
+                    0, 1,
+                    // Description
+                    0, 2,
+                    // Block size
+                    0, 3,
+                ],
                 // Magic
-                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
-                // Unknown
-                0, 0, 0, 0xff,
-                // Unknown length + bytes
-                0, 0, 0, 4,
-                0xff, 0xff, 0xff, 0xff,
-
-            ],
+                IHAVEOPT_BUF,
+                &[
+                    // Unknown
+                    0, 0, 0, 0xff,
+                    // Unknown length + bytes
+                    0, 0, 0, 4,
+                    0xff, 0xff, 0xff, 0xff,
+                ],
+            ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
                 known: vec![(
@@ -632,19 +639,11 @@ mod valid_tests {
     frame_write_tests! {
         server_handshake_empty: (
             Frame::ServerHandshake(HandshakeFlags::empty()),
-            [
-                b'N', b'B', b'D', b'M', b'A', b'G', b'I', b'C',
-                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
-                0, 0,
-            ],
+            [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 0]].concat(),
         ),
         server_handshake_full: (
             Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
-            [
-                b'N', b'B', b'D', b'M', b'A', b'G', b'I', b'C',
-                b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T',
-                0, 1 | 2,
-            ],
+            [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
         ),
     }
 }
