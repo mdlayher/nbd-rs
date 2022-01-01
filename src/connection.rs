@@ -100,7 +100,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     /// stream.
     async fn read_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
         loop {
-            if let Some(frame) = self.parse_frame(&frame_type)? {
+            if let Some(frame) = self.parse_frame(frame_type)? {
                 // We read enough data to parse an entire frame, return it now.
                 return Ok(Some(frame));
             }
@@ -130,7 +130,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 
     /// Try to parse a single `Frame` but also terminate early with an
     /// incomplete error if we need to read more data from the stream.
-    fn parse_frame(&mut self, frame_type: &FrameType) -> crate::Result<Option<Frame>> {
+    fn parse_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
         use frame::Error::Incomplete;
 
         // Begin checking the data we have buffered and see if we can return an

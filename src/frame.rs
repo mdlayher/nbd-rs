@@ -233,7 +233,7 @@ impl GoRequest {
 impl Frame {
     /// Determines if enough data is available to parse a `Frame` of the given
     /// `FrameType` from `src`.
-    pub fn check(src: &mut io::Cursor<&[u8]>, frame_type: &FrameType) -> Result<()> {
+    pub fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
         match frame_type {
             FrameType::ClientFlags => {
                 get_u32(src)?;
@@ -251,12 +251,12 @@ impl Frame {
             // TODO(mdlayher): implement client as well.
             FrameType::ServerHandshake
             | FrameType::ServerOptions
-            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(*frame_type)),
+            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(frame_type)),
         }
     }
 
     /// Parses the next `Frame` according to the given `FrameType`.
-    pub fn parse(src: &mut io::Cursor<&[u8]>, frame_type: &FrameType) -> Result<Frame> {
+    pub fn parse(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
         match frame_type {
             FrameType::ClientFlags => {
                 let flags =
@@ -283,7 +283,7 @@ impl Frame {
             // TODO(mdlayher): implement client as well.
             FrameType::ServerHandshake
             | FrameType::ServerOptions
-            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(*frame_type)),
+            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(frame_type)),
         }
     }
 
@@ -501,10 +501,10 @@ mod valid_tests {
                 let (buf, frame_type, want) = $value;
                 let mut src = io::Cursor::new(&buf[..]);
 
-                Frame::check(&mut src, &frame_type).expect("failed to check frame");
+                Frame::check(&mut src, frame_type).expect("failed to check frame");
                 src.set_position(0);
 
-                let got = match Frame::parse(&mut src, &frame_type).expect("failed to parse frame") {
+                let got = match Frame::parse(&mut src, frame_type).expect("failed to parse frame") {
                     $type(v) => v,
                     frame => panic!("expected a {:?} frame, but got: {:?}", frame_type, frame),
                 };
@@ -684,7 +684,7 @@ mod invalid_tests {
                 let (buf, frame_type) = $value;
                 let mut src = io::Cursor::new(&buf[..]);
 
-                let err = Frame::check(&mut src, &frame_type).expect_err("frame check succeeded");
+                let err = Frame::check(&mut src, frame_type).expect_err("frame check succeeded");
 
                 assert!(matches!(err, Error::Incomplete), "expected Error::Incomplete, but got: {:?}", err);
             }
@@ -708,7 +708,7 @@ mod invalid_tests {
             FrameType::ServerUnsupportedOptions,
         ];
 
-        for ft in &types {
+        for ft in types {
             let err =
                 Frame::check(&mut io::Cursor::default(), ft).expect_err("cursor should be empty");
 
