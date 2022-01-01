@@ -714,7 +714,16 @@ mod invalid_tests {
 
             assert!(
                 matches!(err, Error::Unsupported(_)),
-                "expected unsupported frame type for {:?}",
+                "expected unsupported frame type from Frame::check for {:?}",
+                ft,
+            );
+
+            let err =
+                Frame::parse(&mut io::Cursor::default(), ft).expect_err("cursor should be empty");
+
+            assert!(
+                matches!(err, Error::Unsupported(_)),
+                "expected unsupported frame type from Frame::parse for {:?}",
                 ft,
             );
         }
