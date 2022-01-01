@@ -155,3 +155,98 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consts::*;
+    use tokio::net;
+
+    /// A symbolic constant for 1 MiB.
+    #[allow(non_upper_case_globals)]
+    const MiB: u64 = 1 << 20;
+
+    #[tokio::test]
+    async fn handshake() {
+        // Start a locally bound TCP listener and connect to it via another
+        // socket so we can perform client/server testing.
+        let listener = net::TcpListener::bind("localhost:0")
+            .await
+            .expect("failed to listen");
+
+        let mut stream = net::TcpStream::connect(
+            listener
+                .local_addr()
+                .expect("failed to get listener address"),
+        )
+        .await
+        .expect("failed to connect");
+
+        let server = tokio::spawn(async move {
+            let export = Export {
+                name: "foo".to_string(),
+                description: "bar".to_string(),
+                size: 256 * MiB,
+                block_size: 512,
+                readonly: true,
+            };
+
+            let (socket, _) = listener.accept().await.expect("failed to accept");
+
+            // TODO(mdlayher): move forward to data transmission?
+            let _conn = Connection::handshake(socket, export)
+                .await
+                .expect("failed to perform server handshake");
+        });
+
+        let client = tokio::spawn(async move {
+            // We don't have a Client type so these read/write interactions and
+            // bytes are handled manually for now.
+            //
+            // TODO(mdlayher): replace with Client type and proper Frame support.
+
+            // Drain server handshake.
+            let mut buf = BytesMut::with_capacity(8 * 1024);
+            let n = stream
+                .read_buf(&mut buf)
+                .await
+                .expect("failed to drain server handshake");
+            buf.advance(n);
+
+            // Send client flags.
+            stream
+                .write_u32((ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES).bits())
+                .await
+                .expect("failed to send client flags");
+
+            // Send client options. Notably this sends an unknown option 0 with
+            // length 0 for the time being; we don't care about sending a known
+            // option.
+            stream
+                .write_all(&[IHAVEOPT_BUF, &[0u8; 8]].concat())
+                .await
+                .expect("failed to send client options");
+
+            stream.flush().await.expect("failed to flush stream");
+
+            // Read server options.
+            stream
+                .read_buf(&mut buf)
+                .await
+                .expect("failed to read server options");
+
+            // Since we don't support full frame parsing for frames that are
+            // sent to clients, just assert for the server's reply magic value
+            // which indicates it accepted our handshake and sent some kind of
+            // options data back to us.
+            assert_eq!(
+                &buf[..8],
+                REPLYMAGIC_BUF,
+                "unexpected server reply magic value"
+            );
+        });
+
+        client.await.expect("failed to run client");
+        server.await.expect("failed to run server");
+    }
+}
