@@ -490,8 +490,9 @@ impl fmt::Display for Error {
 mod valid_tests {
     use super::*;
 
-    const NBDMAGIC_BUF: &[u8] = &[b'N', b'B', b'D', b'M', b'A', b'G', b'I', b'C'];
-    const IHAVEOPT_BUF: &[u8] = &[b'I', b'H', b'A', b'V', b'E', b'O', b'P', b'T'];
+    const NBDMAGIC_BUF: &[u8] = b"NBDMAGIC";
+    const IHAVEOPT_BUF: &[u8] = b"IHAVEOPT";
+    const REPLYMAGIC_BUF: &[u8] = &[0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9];
 
     macro_rules! frame_read_tests {
         ($($name:ident: $type:path: $value:expr,)*) => {
@@ -644,6 +645,34 @@ mod valid_tests {
         server_handshake_full: (
             Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
             [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
+        ),
+        server_unsupported_options_full: (
+            Frame::ServerUnsupportedOptions(vec![1, 2]),
+            [
+                // Option 1
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Option code
+                    0, 0, 0, 1,
+                    // Error unsupported
+                    0x80, 0, 0, 1,
+                    // String length
+                    0, 0, 0, 42,
+                ],
+                // Error string
+                b"the server does not support this option: 1",
+
+                // Option 2; see comments above.
+                REPLYMAGIC_BUF,
+                &[
+                    0, 0, 0, 2,
+                    0x80, 0, 0, 1,
+                    0, 0, 0, 42,
+                ],
+                b"the server does not support this option: 2",
+            ].concat(),
         ),
     }
 
