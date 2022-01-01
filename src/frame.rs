@@ -665,6 +665,110 @@ mod valid_tests {
                 b"the server does not support this option: 2",
             ].concat(),
         ),
+        server_options_full: (
+            Frame::ServerOptions(Export{
+                name: "foo".to_string(),
+                description: "bar".to_string(),
+                size: 1024,
+                block_size: 512,
+                readonly: true,
+            }, vec![(
+                OptionRequestCode::Go,
+                OptionRequest::Go(GoRequest{
+                    name: Some("foo".to_string()),
+                    info_requests: vec![
+                        InfoType::Export,
+                        InfoType::Name,
+                        InfoType::Description,
+                        InfoType::BlockSize
+                    ],
+                })
+            )]),
+            [
+                // Export
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // NBD_REP_INFO
+                    0, 0, 0, 3,
+                    // Length
+                    0, 0, 0, 12,
+                    // Export info type
+                    0, 0,
+                    // Size
+                    0, 0, 0, 0, 0, 0, 4, 0,
+                    // Transmission flags
+                    0, 1 | 2,
+                ],
+                // Name
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // NBD_REP_INFO
+                    0, 0, 0, 3,
+                    // Length
+                    0, 0, 0, 5,
+                    // Name info type
+                    0, 1,
+                    // Name
+                    b'f', b'o', b'o',
+                ],
+                // Description
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // NBD_REP_INFO
+                    0, 0, 0, 3,
+                    // Length
+                    0, 0, 0, 5,
+                    // Description info type
+                    0, 2,
+                    // Description
+                    b'b', b'a', b'r',
+                ],
+                // Block size
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // NBD_REP_INFO
+                    0, 0, 0, 3,
+                    // Length
+                    0, 0, 0, 14,
+                    // Block size info type
+                    0, 3,
+                    // Minimum size
+                    0, 0, 2, 0,
+                    // Preferred size
+                    0, 0, 2, 0,
+                    // Maximum size
+                    0, 0, 2, 0,
+                ],
+                // Final acknowledgement
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // NBD_REP_ACK
+                    0, 0, 0, 1,
+                    // Length (empty)
+                    0, 0, 0, 0,
+                ],
+            ].concat(),
+        ),
     }
 
     macro_rules! frame_write_none_tests {
