@@ -64,7 +64,7 @@ pub struct ClientOptions {
 }
 
 /// Information about the Network Block Device being served.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Export {
     pub name: String,
     pub description: String,
@@ -645,6 +645,30 @@ mod valid_tests {
             Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
             [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
         ),
+    }
+
+    macro_rules! frame_write_none_tests {
+        ($($name:ident: $value:expr,)*) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                let frame = $value;
+                let frame_msg = format!("{:?}", frame);
+
+                let mut got = vec![];
+                let result = frame.write(&mut got).await.expect("failed to write frame");
+
+                assert!(matches!(result, None), "expected None return from write");
+
+                assert!(got.is_empty(), "expected empty frame bytes for {}: {:?}", frame_msg, got);
+            }
+        )*
+        }
+    }
+
+    frame_write_none_tests! {
+        server_options_none: Frame::ServerOptions(Export::default(), Vec::new()),
+        server_unsupported_options_none: Frame::ServerUnsupportedOptions(Vec::new()),
     }
 }
 
