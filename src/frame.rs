@@ -4,7 +4,7 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::cmp::max;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::consts::*;
@@ -180,24 +180,22 @@ pub enum InfoType {
 }
 
 impl GoRequest {
-    /// Writes the request bytes for a `GoRequest` to `dst.`
-    //
-    // TODO(mdlayher): there's no real reason for this to be async other than
-    // having access to write_u32 and friends because we are writing to an
-    // in-memory vector. Consider investigating.
-    pub async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<()> {
-        let name = if let Some(name) = &self.name {
-            name.as_bytes()
+    /// Writes the request bytes for a `GoRequest` to `dst`.
+    pub fn write(&self, dst: &mut Vec<u8>) -> io::Result<()> {
+        if let Some(name) = &self.name {
+            // A name is present, write its length and the bytes if any exist.
+            let length = name.len() as u32;
+            Write::write_all(dst, &length.to_be_bytes())?;
+            if length > 0 {
+                Write::write_all(dst, name.as_bytes())?;
+            }
         } else {
-            &[]
+            Write::write_all(dst, &0u32.to_be_bytes())?;
         };
 
-        dst.write_u32(name.len() as u32).await?;
-        dst.write_all(name).await?;
-
-        dst.write_u16(self.info_requests.len() as u16).await?;
+        Write::write_all(dst, &(self.info_requests.len() as u16).to_be_bytes())?;
         for info_request in &self.info_requests {
-            dst.write_u16(*info_request as u16).await?;
+            Write::write_all(dst, &(*info_request as u16).to_be_bytes())?;
         }
 
         Ok(())
@@ -413,7 +411,7 @@ impl Frame {
                     // stream.
                     let mut buf = vec![];
                     match option {
-                        OptionRequest::Go(go) => go.write(&mut buf).await?,
+                        OptionRequest::Go(go) => go.write(&mut buf)?,
                     };
 
                     dst.write_u32(buf.len() as u32).await?;
