@@ -226,6 +226,29 @@ impl GoRequest {
 
         Ok(())
     }
+
+    /// Writes the request bytes for a `GoRequest` to `dst.`
+    //
+    // TODO(mdlayher): there's no real reason for this to be async other than
+    // having access to write_u32 and friends because we are writing to an
+    // in-memory vector. Consider investigating.
+    pub async fn request<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<()> {
+        let name = if let Some(name) = &self.name {
+            name.as_bytes()
+        } else {
+            &[]
+        };
+
+        dst.write_u32(name.len() as u32).await?;
+        dst.write_all(name).await?;
+
+        dst.write_u16(self.info_requests.len() as u16).await?;
+        for info_request in &self.info_requests {
+            dst.write_u16(*info_request as u16).await?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Frame {
@@ -344,6 +367,35 @@ impl Frame {
     pub async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<Option<()>> {
         match self {
             Frame::ClientFlags(flags) => dst.write_u32(flags.bits()).await?,
+            Frame::ClientOptions(options) => {
+                // TODO(mdlayher): from a client perspective, it doesn't really
+                // make sense to have known/unknown options. Only send known
+                // options for now.
+                assert!(options.unknown.is_empty(), "unknown options must be empty");
+
+                let options = &options.known;
+                if options.is_empty() {
+                    // Noop, nothing to write.
+                    return Ok(None);
+                }
+
+                // Write each option's header and code.
+                for (code, option) in options {
+                    dst.write_u64(IHAVEOPT).await?;
+                    dst.write_u32(*code as u32).await?;
+
+                    // Write each option to a vector first so we can compute its
+                    // length and prepend that to the vector's bytes in the
+                    // stream.
+                    let mut buf = vec![];
+                    match option {
+                        OptionRequest::Go(go) => go.request(&mut buf).await?,
+                    };
+
+                    dst.write_u32(buf.len() as u32).await?;
+                    dst.write_all(&buf).await?;
+                }
+            }
             Frame::ServerHandshake(flags) => {
                 // Opening handshake and server flags.
                 dst.write_u64(NBDMAGIC).await?;
@@ -388,11 +440,6 @@ impl Frame {
                     dst.write_all(error.as_bytes()).await?;
                 }
             }
-
-            // Options sent by Client.
-            //
-            // TODO(mdlayher): implement client as well.
-            Frame::ClientOptions(_) => unimplemented!(),
         }
 
         // Wrote some data.
@@ -842,6 +889,49 @@ mod valid_tests {
             Frame::ClientFlags(ClientFlags::all()),
             &[0, 0, 0, 1 | 2],
         ),
+        client_options_roundtrip: (
+            Frame::ClientOptions(ClientOptions{
+                known: vec![(
+                    OptionRequestCode::Go,
+                    OptionRequest::Go(GoRequest{
+                        name: Some("test".to_string()),
+                        info_requests: vec![
+                            InfoType::Export,
+                            InfoType::Name,
+                            InfoType::Description,
+                            InfoType::BlockSize,
+                        ],
+                    }),
+                )],
+                unknown: Vec::new(),
+            }),
+            [
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // Go length
+                    0, 0, 0, 18,
+
+                    // GoRequest
+                    //
+                    // Name length + name
+                    0, 0, 0, 4,
+                    b't', b'e', b's', b't',
+                    // Number of info requests
+                    0, 4,
+                    // Export
+                    0, 0,
+                    // Name
+                    0, 1,
+                    // Description
+                    0, 2,
+                    // Block size
+                    0, 3,
+                ],
+            ].concat(),
+        ),
         server_handshake_roundtrip: (
             Frame::ServerHandshake(HandshakeFlags::all()),
             [
@@ -900,6 +990,7 @@ mod valid_tests {
     }
 
     frame_write_none_tests! {
+        client_options_none: Frame::ClientOptions(ClientOptions{known: Vec::new(), unknown: Vec::new()}),
         server_options_none: Frame::ServerOptions(Export::default(), Vec::new()),
         server_unsupported_options_none: Frame::ServerUnsupportedOptions(Vec::new()),
     }
