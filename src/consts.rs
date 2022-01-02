@@ -3,6 +3,10 @@
 
 #![allow(dead_code)]
 
+/// A symbolic constant for 1 MiB.
+#[allow(non_upper_case_globals)]
+pub const MiB: u64 = 1 << 20;
+
 pub const NBDMAGIC: u64 = 0x4e42444d41474943;
 pub const IHAVEOPT: u64 = 0x49484156454F5054;
 pub const REPLYMAGIC: u64 = 0x3e889045565a9;

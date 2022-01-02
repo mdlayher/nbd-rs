@@ -13,7 +13,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     /// Initiates the NBD server handshake with `stream` (typically a client TCP
     /// connection) and exposes metadata from `export`, creating a `Connection`
     /// which is ready to transmit data.
-    pub async fn handshake(stream: S, export: Export) -> crate::Result<Self> {
+    ///
+    /// If the client wishes to read data from the server without initiating the
+    /// data transmission phase, `Ok(None)` will be returned.
+    pub async fn handshake(stream: S, export: Export) -> crate::Result<Option<Self>> {
         let mut conn = RawConnection::new(stream);
 
         // Send opening handshake, verify client flags.
@@ -59,19 +62,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
             // For every client known request option, generate the appropriate
             // response.
-            let response = client_options
+            let response: Vec<OptionResponse> = client_options
                 .known
                 .into_iter()
                 .map(OptionResponse::from)
                 .collect();
 
+            let start_transmit = response.iter().any(OptionResponse::start_transmit);
+
             // Always send export data, but possibly more data.
             conn.write_frame(Frame::ServerOptions(export, response))
                 .await?;
-        }
 
-        // Handshake complete, ready for transmission.
-        Ok(Self { conn })
+            // Handshake complete, ready for transmission.
+            if start_transmit {
+                Ok(Some(Self { conn }))
+            } else {
+                Ok(None)
+            }
+        }
     }
 
     /// Begins the data transmission phase of the NBD protocol with a client
@@ -170,10 +179,6 @@ mod tests {
     use crate::consts::*;
     use tokio::net;
 
-    /// A symbolic constant for 1 MiB.
-    #[allow(non_upper_case_globals)]
-    const MiB: u64 = 1 << 20;
-
     #[tokio::test]
     async fn handshake() {
         // Start a locally bound TCP listener and connect to it via another
@@ -201,10 +206,15 @@ mod tests {
 
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
-            // TODO(mdlayher): move forward to data transmission?
-            let _conn = Connection::handshake(socket, export)
+            // TODO(mdlayher): make tests for data transmission phase later.
+            let conn = Connection::handshake(socket, export)
                 .await
                 .expect("failed to perform server handshake");
+
+            assert!(
+                conn.is_none(),
+                "handshake should not have negotiated data transmission"
+            );
         });
 
         let client = tokio::spawn(async move {

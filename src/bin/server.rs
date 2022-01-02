@@ -34,14 +34,21 @@ async fn main() {
 
 async fn process(socket: TcpStream, addr: SocketAddr, export: Export) {
     let mut conn = match Connection::handshake(socket, export).await {
-        Ok(c) => c,
+        Ok(conn) => match conn {
+            Some(conn) => conn,
+            None => {
+                println!("{:?}: sent metadata, skipping transmission", addr);
+                return;
+            }
+        },
         Err(err) => {
-            println!("handshake error: {:?}: {:?}", addr, err);
+            println!("{:?}: handshake error: {}", addr, err);
             return;
         }
     };
 
+    println!("{:?}: starting data transmission", addr);
     if let Err(err) = conn.transmit().await {
-        println!("transmit error: {:?}: {:?}", addr, err);
+        println!("{:?}: transmit error: {}", addr, err);
     }
 }

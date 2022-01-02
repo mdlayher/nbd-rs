@@ -76,12 +76,14 @@ pub struct Export {
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
 pub enum OptionRequestCode {
     Go = NBD_OPT_GO,
+    List = NBD_OPT_LIST,
 }
 
 /// The contents of known options which a client can send to a server.
 #[derive(Debug, PartialEq)]
 pub enum OptionRequest {
     Go(GoRequest),
+    List,
 }
 
 /// The contents of known options which a server can respond to on behalf of a
@@ -89,12 +91,14 @@ pub enum OptionRequest {
 #[derive(Debug, PartialEq)]
 pub enum OptionResponse {
     Go(GoResponse),
+    List(ListResponse),
 }
 
 impl From<OptionRequest> for OptionResponse {
     fn from(src: OptionRequest) -> OptionResponse {
         match src {
             OptionRequest::Go(req) => OptionResponse::Go(req.into()),
+            OptionRequest::List => OptionResponse::List(ListResponse()),
         }
     }
 }
@@ -149,15 +153,22 @@ impl OptionRequest {
     fn code(&self) -> OptionRequestCode {
         match self {
             Self::Go(..) => OptionRequestCode::Go,
+            Self::List => OptionRequestCode::List,
         }
     }
 }
 
 impl OptionResponse {
+    /// Reports whether NBD data transmission should begin after this option is processed.
+    pub fn start_transmit(&self) -> bool {
+        matches!(self, Self::Go(..))
+    }
+
     /// Returns the associated `OptionRequestCode` for `self`.
     fn code(&self) -> OptionRequestCode {
         match self {
             Self::Go(..) => OptionRequestCode::Go,
+            Self::List(..) => OptionRequestCode::List,
         }
     }
 }
@@ -284,6 +295,56 @@ impl GoResponse {
         dst.write_u32(length).await?;
         dst.write_u16(info_type as u16).await?;
         dst.write_all(string.as_bytes()).await?;
+
+        Ok(())
+    }
+}
+
+/// A List option as sent by a server in response to a client. This type
+/// contains no data of its own but exists to hold methods for writing export
+/// data lists to clients.
+#[derive(Debug, PartialEq)]
+pub struct ListResponse();
+
+impl ListResponse {
+    /// Writes the bytes describing `export` to `dst`.
+    pub async fn write<S: AsyncWrite + Unpin>(
+        &self,
+        dst: &mut S,
+        export: &Export,
+    ) -> io::Result<()> {
+        // Each export reply is prefixed with magic and the List code.
+        //
+        // TODO(mdlayher): support for passing in multiple exports.
+        for export in [export] {
+            dst.write_u64(REPLYMAGIC).await?;
+            dst.write_u32(OptionRequestCode::List as u32).await?;
+
+            dst.write_u32(NBD_REP_SERVER).await?;
+
+            // Pack in the name and description strings along with an extra 4
+            // for the name string length as the option's body. Clients will
+            // interpret bytes up to name_length as the export name and bytes
+            // beyond as a human-readable string, which we use to describe the
+            // export's metadata.
+            let metadata = format!(
+                "{} (size: {}MiB, block size: {}B)",
+                export.description,
+                // TODO(mdlayher): this bytes to MiB calculation is good enough
+                // for now but probably not very robust.
+                export.size / (1 << 20),
+                export.block_size
+            );
+
+            let name_length = export.name.len() as u32;
+            let meta_length = metadata.len() as u32;
+
+            dst.write_u32(name_length + meta_length + 4).await?;
+            dst.write_u32(name_length).await?;
+
+            dst.write_all(export.name.as_bytes()).await?;
+            dst.write_all(metadata.as_bytes()).await?;
+        }
 
         Ok(())
     }
@@ -428,10 +489,15 @@ impl Frame {
                     let mut buf = vec![];
                     match option {
                         OptionRequest::Go(go) => go.write(&mut buf)?,
+                        // Noop, already wrote the code and body is empty.
+                        OptionRequest::List => {}
                     };
 
+                    let length = buf.len() as u32;
                     dst.write_u32(buf.len() as u32).await?;
-                    dst.write_all(&buf).await?;
+                    if length > 0 {
+                        dst.write_all(&buf).await?;
+                    }
                 }
             }
             Frame::ServerHandshake(flags) => {
@@ -451,6 +517,8 @@ impl Frame {
                 for option in options {
                     match option {
                         OptionResponse::Go(res) => res.write(dst, export).await?,
+                        // TODO(mdlayher): support for multiple exports.
+                        OptionResponse::List(res) => res.write(dst, export).await?,
                     }
 
                     // Acknowledge the option was processed.
@@ -562,6 +630,8 @@ fn next_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Par
     Ok(match FromPrimitive::from_u32(option_code) {
         Some(option) => ParsedOption::Known(match option {
             OptionRequestCode::Go => OptionRequest::go(src, frame_type)?,
+            // No body, no need to advance src.
+            OptionRequestCode::List => OptionRequest::List,
         }),
         None => {
             // We aren't aware of this option, skip over it but note its code as
@@ -776,7 +846,7 @@ mod valid_tests {
             Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
             [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
         ),
-        server_options_full: (
+        server_options_go_full: (
             Frame::ServerOptions(Export{
                 name: "foo".to_string(),
                 description: "bar".to_string(),
@@ -877,6 +947,47 @@ mod valid_tests {
                 ],
             ].concat(),
         ),
+        server_options_list_full: (
+            Frame::ServerOptions(Export{
+                name: "foo".to_string(),
+                description: "bar".to_string(),
+                size: 256 * MiB,
+                block_size: 512,
+                readonly: true,
+            }, vec![OptionResponse::List(ListResponse())]),
+            [
+                // List
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // List
+                    0, 0, 0, 3,
+                    // NBD_REP_SERVER
+                    0, 0, 0, 2,
+                    // Length
+                    0, 0, 0, 43,
+                    // Name length
+                    0, 0, 0, 3,
+                    // Name
+                    b'f', b'o', b'o',
+                ],
+                // Metadata
+                b"bar (size: 256MiB, block size: 512B)",
+                // Final acknowledgement
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // List
+                    0, 0, 0, 3,
+                    // NBD_REP_ACK
+                    0, 0, 0, 1,
+                    // Length (empty)
+                    0, 0, 0, 0,
+                ],
+            ].concat(),
+        ),
     }
 
     macro_rules! frame_roundtrip_tests {
@@ -915,7 +1026,7 @@ mod valid_tests {
             Frame::ClientFlags(ClientFlags::all()),
             &[0, 0, 0, 1 | 2],
         ),
-        client_options_roundtrip: (
+        client_options_go_roundtrip: (
             Frame::ClientOptions(ClientOptions{
                 known: vec![OptionRequest::Go(GoRequest{
                     name: Some("test".to_string()),
@@ -952,6 +1063,22 @@ mod valid_tests {
                     0, 2,
                     // Block size
                     0, 3,
+                ],
+            ].concat(),
+        ),
+        client_options_list_roundtrip: (
+            Frame::ClientOptions(ClientOptions{
+                known: vec![OptionRequest::List],
+                unknown: Vec::new(),
+            }),
+            [
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // List
+                    0, 0, 0, 3,
+                    // List length
+                    0, 0, 0, 0,
                 ],
             ].concat(),
         ),
