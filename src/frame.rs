@@ -75,7 +75,7 @@ pub struct Export {
 /// Denotes the type of known options which can be handled by the server.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
-pub enum OptionRequestCode {
+pub enum OptionCode {
     Abort = NBD_OPT_ABORT,
     Go = NBD_OPT_GO,
     Info = NBD_OPT_INFO,
@@ -162,13 +162,13 @@ impl OptionRequest {
         })
     }
 
-    /// Returns the associated `OptionRequestCode` for `self`.
-    fn code(&self) -> OptionRequestCode {
+    /// Returns the associated `OptionCode` for `self`.
+    fn code(&self) -> OptionCode {
         match self {
-            Self::Abort => OptionRequestCode::Abort,
-            Self::Go(..) => OptionRequestCode::Go,
-            Self::Info(..) => OptionRequestCode::Info,
-            Self::List => OptionRequestCode::List,
+            Self::Abort => OptionCode::Abort,
+            Self::Go(..) => OptionCode::Go,
+            Self::Info(..) => OptionCode::Info,
+            Self::List => OptionCode::List,
         }
     }
 }
@@ -179,13 +179,13 @@ impl OptionResponse {
         matches!(self, Self::Go(..))
     }
 
-    /// Returns the associated `OptionRequestCode` for `self`.
-    fn code(&self) -> OptionRequestCode {
+    /// Returns the associated `OptionCode` for `self`.
+    fn code(&self) -> OptionCode {
         match self {
-            Self::Abort => OptionRequestCode::Abort,
-            Self::Go(..) => OptionRequestCode::Go,
-            Self::Info(..) => OptionRequestCode::Info,
-            Self::List(..) => OptionRequestCode::List,
+            Self::Abort => OptionCode::Abort,
+            Self::Go(..) => OptionCode::Go,
+            Self::Info(..) => OptionCode::Info,
+            Self::List(..) => OptionCode::List,
         }
     }
 }
@@ -251,8 +251,8 @@ impl GoRequest {
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum GoResponseCode {
-    Go = OptionRequestCode::Go as u32,
-    Info = OptionRequestCode::Info as u32,
+    Go = OptionCode::Go as u32,
+    Info = OptionCode::Info as u32,
 }
 
 impl GoResponse {
@@ -341,7 +341,7 @@ impl ListResponse {
         // TODO(mdlayher): support for passing in multiple exports.
         for export in [export] {
             dst.write_u64(REPLYMAGIC).await?;
-            dst.write_u32(OptionRequestCode::List as u32).await?;
+            dst.write_u32(OptionCode::List as u32).await?;
 
             dst.write_u32(NBD_REP_SERVER).await?;
 
@@ -531,7 +531,7 @@ impl Frame {
             }
             Frame::ServerOptionsAbort => {
                 // Abort writes a simple acknowledgement and nothing more.
-                Self::ack(dst, OptionRequestCode::Abort).await?;
+                Self::ack(dst, OptionCode::Abort).await?;
             }
             Frame::ServerOptions(export, options) => {
                 if options.is_empty() {
@@ -588,7 +588,7 @@ impl Frame {
     }
 
     /// Writes an acknowledgement for `code to `dst`.
-    async fn ack<S: AsyncWrite + Unpin>(dst: &mut S, code: OptionRequestCode) -> io::Result<()> {
+    async fn ack<S: AsyncWrite + Unpin>(dst: &mut S, code: OptionCode) -> io::Result<()> {
         dst.write_u64(REPLYMAGIC).await?;
         dst.write_u32(code as u32).await?;
         dst.write_u32(NBD_REP_ACK).await?;
@@ -673,11 +673,11 @@ fn next_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Par
 
     Ok(match FromPrimitive::from_u32(option_code) {
         Some(option) => ParsedOption::Known(match option {
-            OptionRequestCode::Go => OptionRequest::Go(OptionRequest::go(src, frame_type)?),
-            OptionRequestCode::Info => OptionRequest::Info(OptionRequest::go(src, frame_type)?),
+            OptionCode::Go => OptionRequest::Go(OptionRequest::go(src, frame_type)?),
+            OptionCode::Info => OptionRequest::Info(OptionRequest::go(src, frame_type)?),
             // These options have no body, no need to advance src.
-            OptionRequestCode::Abort => OptionRequest::Abort,
-            OptionRequestCode::List => OptionRequest::List,
+            OptionCode::Abort => OptionRequest::Abort,
+            OptionCode::List => OptionRequest::List,
         }),
         None => {
             // We aren't aware of this option, skip over it but note its code as
