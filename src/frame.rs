@@ -252,12 +252,23 @@ impl Frame {
                 get_u16(src)?;
                 Ok(())
             }
+            FrameType::ServerUnsupportedOptions => {
+                while src.has_remaining() {
+                    // REPLYMAGIC u64, option u32 + unsupported error u32
+                    get_u64(src)?;
+                    get_u64(src)?;
+
+                    // Read error message length and then skip the text bytes.
+                    let length = get_u32(src)? as usize;
+                    skip(src, length)?;
+                }
+
+                Ok(())
+            }
             // Frames the server will send instead of the client.
             //
             // TODO(mdlayher): implement client as well.
-            FrameType::ServerOptions | FrameType::ServerUnsupportedOptions => {
-                Err(Error::Unsupported(frame_type))
-            }
+            FrameType::ServerOptions => Err(Error::Unsupported(frame_type)),
         }
     }
 
@@ -297,12 +308,34 @@ impl Frame {
 
                 Ok(Frame::ServerHandshake(flags))
             }
+            FrameType::ServerUnsupportedOptions => {
+                let mut options = Vec::new();
+                while src.has_remaining() {
+                    if get_u64(src)? != REPLYMAGIC {
+                        return Err(Error::Protocol(frame_type));
+                    }
+
+                    options.push(get_u32(src)?);
+
+                    if get_u32(src)? != NBD_REP_ERR_UNSUP {
+                        return Err(Error::Protocol(frame_type));
+                    }
+
+                    // Read error message length and then skip the textual
+                    // bytes for now.
+                    //
+                    // TODO(mdlayher): figure out a way to expose this as part
+                    // of the enum that makes sense for both client and server.
+                    let length = get_u32(src)? as usize;
+                    skip(src, length)?;
+                }
+
+                Ok(Frame::ServerUnsupportedOptions(options))
+            }
             // Frames the server will send instead of the client.
             //
             // TODO(mdlayher): implement client as well.
-            FrameType::ServerOptions | FrameType::ServerUnsupportedOptions => {
-                Err(Error::Unsupported(frame_type))
-            }
+            FrameType::ServerOptions => Err(Error::Unsupported(frame_type)),
         }
     }
 
@@ -348,7 +381,7 @@ impl Frame {
                     dst.write_u64(REPLYMAGIC).await?;
                     dst.write_u32(*option).await?;
 
-                    let error = format!("the server does not support this option: {}", option);
+                    let error = format!("unsupported option: {}", option);
 
                     dst.write_u32(NBD_REP_ERR_UNSUP).await?;
                     dst.write_u32(error.len() as u32).await?;
@@ -374,6 +407,7 @@ impl Frame {
         match self {
             Self::ClientFlags(_) => FrameType::ClientFlags,
             Self::ServerHandshake(_) => FrameType::ServerHandshake,
+            Self::ServerUnsupportedOptions(_) => FrameType::ServerUnsupportedOptions,
             _ => unimplemented!(),
         }
     }
@@ -663,41 +697,9 @@ mod valid_tests {
     }
 
     frame_write_tests! {
-        server_handshake_empty: (
-            Frame::ServerHandshake(HandshakeFlags::empty()),
-            [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 0]].concat(),
-        ),
         server_handshake_full: (
             Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
             [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
-        ),
-        server_unsupported_options_full: (
-            Frame::ServerUnsupportedOptions(vec![1, 2]),
-            [
-                // Option 1
-                //
-                // Magic
-                REPLYMAGIC_BUF,
-                &[
-                    // Option code
-                    0, 0, 0, 1,
-                    // Error unsupported
-                    0x80, 0, 0, 1,
-                    // String length
-                    0, 0, 0, 42,
-                ],
-                // Error string
-                b"the server does not support this option: 1",
-
-                // Option 2; see comments above.
-                REPLYMAGIC_BUF,
-                &[
-                    0, 0, 0, 2,
-                    0x80, 0, 0, 1,
-                    0, 0, 0, 42,
-                ],
-                b"the server does not support this option: 2",
-            ].concat(),
         ),
         server_options_full: (
             Frame::ServerOptions(Export{
@@ -841,13 +843,40 @@ mod valid_tests {
             Frame::ClientFlags(ClientFlags::all()),
             &[0, 0, 0, 1 | 2],
         ),
-
         server_handshake_roundtrip: (
             Frame::ServerHandshake(HandshakeFlags::all()),
             [
                 NBDMAGIC_BUF,
                 IHAVEOPT_BUF,
                 &[0, 1 | 2],
+            ].concat(),
+        ),
+        server_unsupported_options_roundtrip: (
+            Frame::ServerUnsupportedOptions(vec![1, 2]),
+            [
+                // Option 1
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Option code
+                    0, 0, 0, 1,
+                    // Error unsupported
+                    0x80, 0, 0, 1,
+                    // String length
+                    0, 0, 0, 21,
+                ],
+                // Error string
+                b"unsupported option: 1",
+
+                // Option 2; see comments above.
+                REPLYMAGIC_BUF,
+                &[
+                    0, 0, 0, 2,
+                    0x80, 0, 0, 1,
+                    0, 0, 0, 21,
+                ],
+                b"unsupported option: 2",
             ].concat(),
         ),
     }
@@ -971,10 +1000,7 @@ mod invalid_tests {
 
     #[test]
     fn frames_unsupported() {
-        let types = [
-            FrameType::ServerOptions,
-            FrameType::ServerUnsupportedOptions,
-        ];
+        let types = [FrameType::ServerOptions];
 
         for ft in types {
             let err =
