@@ -78,6 +78,7 @@ pub struct Export {
 pub enum OptionRequestCode {
     Abort = NBD_OPT_ABORT,
     Go = NBD_OPT_GO,
+    Info = NBD_OPT_INFO,
     List = NBD_OPT_LIST,
 }
 
@@ -85,7 +86,11 @@ pub enum OptionRequestCode {
 #[derive(Debug, PartialEq)]
 pub enum OptionRequest {
     Abort,
+    // Go and Info ask for the same information, but Go causes data transmission
+    // to immediately begin. The only other way to enter transmission after Info
+    // would be to send NBD_OPT_EXPORT_NAME, which we may never support.
     Go(GoRequest),
+    Info(GoRequest),
     List,
 }
 
@@ -95,6 +100,7 @@ pub enum OptionRequest {
 pub enum OptionResponse {
     Abort,
     Go(GoResponse),
+    Info(GoResponse),
     List(ListResponse),
 }
 
@@ -103,16 +109,18 @@ impl From<OptionRequest> for OptionResponse {
         match src {
             OptionRequest::Abort => OptionResponse::Abort,
             OptionRequest::Go(req) => OptionResponse::Go(req.into()),
+            OptionRequest::Info(req) => OptionResponse::Info(req.into()),
             OptionRequest::List => OptionResponse::List(ListResponse()),
         }
     }
 }
 
 impl OptionRequest {
-    /// Produces an `OptionRequest(GoRequest)` from `src` after the client
-    /// option header has been consumed by `next_option` with the given
-    /// `frame_type`.
-    pub fn go(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<OptionRequest> {
+    /// Produces a `GoRequest` from `src` after the client option header has
+    /// been consumed by `next_option` with the given `frame_type`. This can
+    /// then be associated with `OptionRequest::Go` or `OptionRequest::Info` as
+    /// necessary.
+    fn go(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<GoRequest> {
         // Name may or may not be present.
         let name_length = get_u32(src)? as usize;
         let name = match name_length {
@@ -148,10 +156,10 @@ impl OptionRequest {
             "info_requests must contain at least one element"
         );
 
-        Ok(Self::Go(GoRequest {
+        Ok(GoRequest {
             name,
             info_requests,
-        }))
+        })
     }
 
     /// Returns the associated `OptionRequestCode` for `self`.
@@ -159,6 +167,7 @@ impl OptionRequest {
         match self {
             Self::Abort => OptionRequestCode::Abort,
             Self::Go(..) => OptionRequestCode::Go,
+            Self::Info(..) => OptionRequestCode::Info,
             Self::List => OptionRequestCode::List,
         }
     }
@@ -175,6 +184,7 @@ impl OptionResponse {
         match self {
             Self::Abort => OptionRequestCode::Abort,
             Self::Go(..) => OptionRequestCode::Go,
+            Self::Info(..) => OptionRequestCode::Info,
             Self::List(..) => OptionRequestCode::List,
         }
     }
@@ -215,7 +225,7 @@ pub enum InfoType {
 
 impl GoRequest {
     /// Writes the request bytes for a `GoRequest` to `dst`.
-    pub fn write(&self, dst: &mut Vec<u8>) -> io::Result<()> {
+    fn write(&self, dst: &mut Vec<u8>) -> io::Result<()> {
         if let Some(name) = &self.name {
             // A name is present, write its length and the bytes if any exist.
             let length = name.len() as u32;
@@ -236,17 +246,27 @@ impl GoRequest {
     }
 }
 
+/// A GoResponseCode selects the code that will be sent when calling
+/// `GoResponse.write`.
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum GoResponseCode {
+    Go = OptionRequestCode::Go as u32,
+    Info = OptionRequestCode::Info as u32,
+}
+
 impl GoResponse {
-    /// Writes the bytes for a `GoResponse` to `dst`.
-    pub async fn write<S: AsyncWrite + Unpin>(
+    /// Writes the bytes for a `GoResponse` to `dst` with the specified `code`,
+    async fn write<S: AsyncWrite + Unpin>(
         &self,
         dst: &mut S,
+        code: GoResponseCode,
         export: &Export,
     ) -> io::Result<()> {
         for info in &self.info_requests {
             // Each info request reply is prefixed with magic and the Go code.
             dst.write_u64(REPLYMAGIC).await?;
-            dst.write_u32(OptionRequestCode::Go as u32).await?;
+            dst.write_u32(code as u32).await?;
 
             match *info {
                 InfoType::Export => {
@@ -315,11 +335,7 @@ pub struct ListResponse();
 
 impl ListResponse {
     /// Writes the bytes describing `export` to `dst`.
-    pub async fn write<S: AsyncWrite + Unpin>(
-        &self,
-        dst: &mut S,
-        export: &Export,
-    ) -> io::Result<()> {
+    async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S, export: &Export) -> io::Result<()> {
         // Each export reply is prefixed with magic and the List code.
         //
         // TODO(mdlayher): support for passing in multiple exports.
@@ -495,7 +511,7 @@ impl Frame {
                     // stream.
                     let mut buf = vec![];
                     match option {
-                        OptionRequest::Go(go) => go.write(&mut buf)?,
+                        OptionRequest::Go(req) | OptionRequest::Info(req) => req.write(&mut buf)?,
                         // Noop, already wrote the code and body is empty.
                         OptionRequest::Abort | OptionRequest::List => {}
                     };
@@ -532,7 +548,12 @@ impl Frame {
                             // be called due to the existence of
                             // Frame::ServerOptionsAbort.
                         }
-                        OptionResponse::Go(res) => res.write(dst, export).await?,
+                        OptionResponse::Go(res) => {
+                            res.write(dst, GoResponseCode::Go, export).await?
+                        }
+                        OptionResponse::Info(res) => {
+                            res.write(dst, GoResponseCode::Info, export).await?
+                        }
                         // TODO(mdlayher): support for multiple exports.
                         OptionResponse::List(res) => res.write(dst, export).await?,
                     }
@@ -652,7 +673,8 @@ fn next_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Par
 
     Ok(match FromPrimitive::from_u32(option_code) {
         Some(option) => ParsedOption::Known(match option {
-            OptionRequestCode::Go => OptionRequest::go(src, frame_type)?,
+            OptionRequestCode::Go => OptionRequest::Go(OptionRequest::go(src, frame_type)?),
+            OptionRequestCode::Info => OptionRequest::Info(OptionRequest::go(src, frame_type)?),
             // These options have no body, no need to advance src.
             OptionRequestCode::Abort => OptionRequest::Abort,
             OptionRequestCode::List => OptionRequest::List,
@@ -790,7 +812,6 @@ mod valid_tests {
                 unknown: vec![],
             },
         ),
-
         client_options_go_full: Frame::ClientOptions: (
             [
                 // Magic
@@ -839,6 +860,37 @@ mod valid_tests {
                     ],
                 })],
                 unknown: vec![0xff],
+            },
+        ),
+        // Just test the bare minimum for Info since it shares almost all code
+        // with Go.
+        client_options_info_minimal: Frame::ClientOptions: (
+            [
+                // ClientOptions
+                //
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // Info
+                    0, 0, 0, 6,
+                    // Info length
+                    0, 0, 0, 6,
+
+                    // GoRequest
+                    //
+                    // Name length
+                    0, 0, 0, 0,
+                    // Number of info requests
+                    0, 0,
+                ],
+            ].concat(),
+            FrameType::ClientOptions,
+            ClientOptions{
+                known: vec![OptionRequest::Info(GoRequest{
+                    name: None,
+                    info_requests: vec![InfoType::Export],
+                })],
+                unknown: vec![],
             },
         ),
     }
@@ -1011,6 +1063,52 @@ mod valid_tests {
                 ],
             ].concat(),
         ),
+        // Just test the bare minimum for Info since it shares almost all code
+        // with Go.
+        server_options_info_minimal: (
+            Frame::ServerOptions(Export{
+                name: "foo".to_string(),
+                description: "bar".to_string(),
+                size: 1024,
+                block_size: 512,
+                readonly: true,
+            }, vec![OptionResponse::Info(GoResponse{
+                name: Some("foo".to_string()),
+                info_requests: vec![InfoType::Export],
+            })]),
+            [
+                // Export
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Info
+                    0, 0, 0, 6,
+                    // NBD_REP_INFO
+                    0, 0, 0, 3,
+                    // Length
+                    0, 0, 0, 12,
+                    // Export info type
+                    0, 0,
+                    // Size
+                    0, 0, 0, 0, 0, 0, 4, 0,
+                    // Transmission flags
+                    0, 1 | 2,
+                ],
+                // Final acknowledgement
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Info
+                    0, 0, 0, 6,
+                    // NBD_REP_ACK
+                    0, 0, 0, 1,
+                    // Length (empty)
+                    0, 0, 0, 0,
+                ],
+            ].concat(),
+        ),
         server_options_list_full: (
             Frame::ServerOptions(Export{
                 name: "foo".to_string(),
@@ -1144,6 +1242,36 @@ mod valid_tests {
                     0, 2,
                     // Block size
                     0, 3,
+                ],
+            ].concat(),
+        ),
+        // Just test the bare minimum for Info since it shares almost all code
+        // with Go.
+        client_options_info_roundtrip: (
+            Frame::ClientOptions(ClientOptions{
+                known: vec![OptionRequest::Info(GoRequest{
+                    name: None,
+                    info_requests: vec![InfoType::Export],
+                })],
+                unknown: Vec::new(),
+            }),
+            [
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // Info
+                    0, 0, 0, 6,
+                    // Go length
+                    0, 0, 0, 8,
+
+                    // GoRequest
+                    //
+                    // Name length + name (empty)
+                    0, 0, 0, 0,
+                    // Number of info requests
+                    0, 1,
+                    // Export
+                    0, 0,
                 ],
             ].concat(),
         ),
