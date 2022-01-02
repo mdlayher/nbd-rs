@@ -12,7 +12,7 @@ use crate::consts::*;
 /// An NBD data frame sent between client and server. Note that the frame types
 /// here do not necessarily correspond to the NBD specification, but are used to
 /// chunk up logical operations in this library.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Frame {
     ClientFlags(ClientFlags),
     ClientOptions(ClientOptions),
@@ -62,7 +62,7 @@ pub struct ClientOptions {
 }
 
 /// Information about the Network Block Device being served.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Export {
     pub name: String,
     pub description: String,
@@ -234,6 +234,7 @@ impl Frame {
     pub fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
         match frame_type {
             FrameType::ClientFlags => {
+                // flags u32
                 get_u32(src)?;
                 Ok(())
             }
@@ -244,12 +245,19 @@ impl Frame {
 
                 Ok(())
             }
+            FrameType::ServerHandshake => {
+                // NBDMAGIC u64 + IHAVEOPT u64 + flags u16
+                get_u64(src)?;
+                get_u64(src)?;
+                get_u16(src)?;
+                Ok(())
+            }
             // Frames the server will send instead of the client.
             //
             // TODO(mdlayher): implement client as well.
-            FrameType::ServerHandshake
-            | FrameType::ServerOptions
-            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(frame_type)),
+            FrameType::ServerOptions | FrameType::ServerUnsupportedOptions => {
+                Err(Error::Unsupported(frame_type))
+            }
         }
     }
 
@@ -276,19 +284,33 @@ impl Frame {
 
                 Ok(Frame::ClientOptions(ClientOptions { known, unknown }))
             }
+            FrameType::ServerHandshake => {
+                if get_u64(src)? != NBDMAGIC {
+                    return Err(Error::Protocol(frame_type));
+                }
+                if get_u64(src)? != IHAVEOPT {
+                    return Err(Error::Protocol(frame_type));
+                }
+
+                let flags =
+                    HandshakeFlags::from_bits(get_u16(src)?).ok_or(Error::Protocol(frame_type))?;
+
+                Ok(Frame::ServerHandshake(flags))
+            }
             // Frames the server will send instead of the client.
             //
             // TODO(mdlayher): implement client as well.
-            FrameType::ServerHandshake
-            | FrameType::ServerOptions
-            | FrameType::ServerUnsupportedOptions => Err(Error::Unsupported(frame_type)),
+            FrameType::ServerOptions | FrameType::ServerUnsupportedOptions => {
+                Err(Error::Unsupported(frame_type))
+            }
         }
     }
 
-    /// Consumes the current `Frame` and writes it out to `dst`. It returns
-    /// `Some(())` if any bytes were written to the stream or `None` if not.
-    pub async fn write<S: AsyncWrite + Unpin>(self, dst: &mut S) -> io::Result<Option<()>> {
+    /// Writes the current `Frame` out to `dst`. It returns `Some(())` if any
+    /// bytes were written to the stream or `None` if not.
+    pub async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<Option<()>> {
         match self {
+            Frame::ClientFlags(flags) => dst.write_u32(flags.bits()).await?,
             Frame::ServerHandshake(flags) => {
                 // Opening handshake and server flags.
                 dst.write_u64(NBDMAGIC).await?;
@@ -302,9 +324,9 @@ impl Frame {
                 }
 
                 // Iterate through each valid option and reply to them.
-                for (code, option) in &options {
+                for (code, option) in options {
                     match option {
-                        OptionRequest::Go(req) => req.reply(dst, &export).await?,
+                        OptionRequest::Go(req) => req.reply(dst, export).await?,
                     }
 
                     // Acknowledge the option was processed.
@@ -322,7 +344,7 @@ impl Frame {
 
                 // These options are unsupported, return a textual error and the
                 // unsupported error code.
-                for option in &options {
+                for option in options {
                     dst.write_u64(REPLYMAGIC).await?;
                     dst.write_u32(*option).await?;
 
@@ -337,11 +359,23 @@ impl Frame {
             // Options sent by Client.
             //
             // TODO(mdlayher): implement client as well.
-            Frame::ClientFlags(_) | Frame::ClientOptions(_) => unimplemented!(),
+            Frame::ClientOptions(_) => unimplemented!(),
         }
 
         // Wrote some data.
         Ok(Some(()))
+    }
+
+    #[cfg(test)]
+    /// Converts a Frame to its associated FrameType.
+    //
+    // TODO(mdlayher): is there a smarter way to do this? impl From?
+    fn to_type(&self) -> FrameType {
+        match self {
+            Self::ClientFlags(_) => FrameType::ClientFlags,
+            Self::ServerHandshake(_) => FrameType::ServerHandshake,
+            _ => unimplemented!(),
+        }
     }
 }
 
@@ -771,6 +805,53 @@ mod valid_tests {
         ),
     }
 
+    macro_rules! frame_roundtrip_tests {
+        ($($name:ident: $value:expr,)*) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                let (frame, bytes) = $value;
+
+                let mut buf = vec![];
+                frame.write(&mut buf).await.expect("failed to write frame");
+
+                assert_eq!(
+                    &bytes[..],
+                    &buf[..],
+                    "unexpected frame bytes for {:?}",
+                    frame,
+                );
+
+                let mut src = io::Cursor::new(&buf[..]);
+
+                let frame_type = frame.to_type();
+                Frame::check(&mut src, frame_type).expect("failed to check frame");
+                src.set_position(0);
+
+                let parsed = Frame::parse(&mut src, frame_type).expect("failed to parse frame");
+
+                assert_eq!(frame, parsed, "unexpected frame after roundtrip");
+            }
+        )*
+        }
+    }
+
+    frame_roundtrip_tests! {
+        client_flags_roundtrip: (
+            Frame::ClientFlags(ClientFlags::all()),
+            &[0, 0, 0, 1 | 2],
+        ),
+
+        server_handshake_roundtrip: (
+            Frame::ServerHandshake(HandshakeFlags::all()),
+            [
+                NBDMAGIC_BUF,
+                IHAVEOPT_BUF,
+                &[0, 1 | 2],
+            ].concat(),
+        ),
+    }
+
     macro_rules! frame_write_none_tests {
         ($($name:ident: $value:expr,)*) => {
         $(
@@ -891,7 +972,6 @@ mod invalid_tests {
     #[test]
     fn frames_unsupported() {
         let types = [
-            FrameType::ServerHandshake,
             FrameType::ServerOptions,
             FrameType::ServerUnsupportedOptions,
         ];
