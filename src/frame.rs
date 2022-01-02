@@ -17,7 +17,7 @@ pub enum Frame {
     ClientFlags(ClientFlags),
     ClientOptions(ClientOptions),
     ServerHandshake(HandshakeFlags),
-    ServerOptions(Export, Vec<(OptionRequestCode, OptionResponse)>),
+    ServerOptions(Export, Vec<OptionResponse>),
     ServerUnsupportedOptions(Vec<u32>),
 }
 
@@ -57,7 +57,7 @@ bitflags! {
 /// depending on the server's capabilities.
 #[derive(Debug, Default, PartialEq)]
 pub struct ClientOptions {
-    pub known: Vec<(OptionRequestCode, OptionRequest)>,
+    pub known: Vec<OptionRequest>,
     pub unknown: Vec<u32>,
 }
 
@@ -143,6 +143,22 @@ impl OptionRequest {
             name,
             info_requests,
         }))
+    }
+
+    /// Returns the associated `OptionRequestCode` for `self`.
+    fn code(&self) -> OptionRequestCode {
+        match self {
+            Self::Go(..) => OptionRequestCode::Go,
+        }
+    }
+}
+
+impl OptionResponse {
+    /// Returns the associated `OptionRequestCode` for `self`.
+    fn code(&self) -> OptionRequestCode {
+        match self {
+            Self::Go(..) => OptionRequestCode::Go,
+        }
     }
 }
 
@@ -402,9 +418,9 @@ impl Frame {
                 }
 
                 // Write each option's header and code.
-                for (code, option) in options {
+                for option in options {
                     dst.write_u64(IHAVEOPT).await?;
-                    dst.write_u32(*code as u32).await?;
+                    dst.write_u32(option.code() as u32).await?;
 
                     // Write each option to a vector first so we can compute its
                     // length and prepend that to the vector's bytes in the
@@ -432,14 +448,14 @@ impl Frame {
 
                 // Iterate through each option and write its bytes to the
                 // stream.
-                for (code, option) in options {
+                for option in options {
                     match option {
                         OptionResponse::Go(res) => res.write(dst, export).await?,
                     }
 
                     // Acknowledge the option was processed.
                     dst.write_u64(REPLYMAGIC).await?;
-                    dst.write_u32(*code as u32).await?;
+                    dst.write_u32(option.code() as u32).await?;
                     dst.write_u32(NBD_REP_ACK).await?;
                     dst.write_u32(0).await?;
                 }
@@ -529,7 +545,7 @@ fn skip(src: &mut io::Cursor<&[u8]>, n: usize) -> Result<()> {
 /// Denotes known or unknown options sent by a client.
 #[derive(Debug)]
 enum ParsedOption {
-    Known((OptionRequestCode, OptionRequest)),
+    Known(OptionRequest),
     Unknown(u32),
 }
 
@@ -543,21 +559,17 @@ fn next_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Par
     let option_code = get_u32(src)?;
     let length = get_u32(src)? as usize;
 
-    let option: OptionRequestCode = match FromPrimitive::from_u32(option_code) {
-        Some(o) => o,
+    Ok(match FromPrimitive::from_u32(option_code) {
+        Some(option) => ParsedOption::Known(match option {
+            OptionRequestCode::Go => OptionRequest::go(src, frame_type)?,
+        }),
         None => {
             // We aren't aware of this option, skip over it but note its code as
             // unknown for error reporting.
             skip(src, length)?;
-            return Ok(ParsedOption::Unknown(option_code));
+            ParsedOption::Unknown(option_code)
         }
-    };
-
-    let opt = match option {
-        OptionRequestCode::Go => OptionRequest::go(src, frame_type)?,
-    };
-
-    Ok(ParsedOption::Known((option, opt)))
+    })
 }
 
 /// Contains error information encountered while dealing with Frames.
@@ -677,13 +689,10 @@ mod valid_tests {
             ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
-                known: vec![(
-                    OptionRequestCode::Go,
-                    OptionRequest::Go(GoRequest{
-                        name: None,
-                        info_requests: vec![InfoType::Export],
-                    }),
-                )],
+                known: vec![OptionRequest::Go(GoRequest{
+                    name: None,
+                    info_requests: vec![InfoType::Export],
+                })],
                 unknown: vec![],
             },
         ),
@@ -726,18 +735,15 @@ mod valid_tests {
             ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
-                known: vec![(
-                    OptionRequestCode::Go,
-                    OptionRequest::Go(GoRequest{
-                        name: Some("test".to_string()),
-                        info_requests: vec![
-                            InfoType::Export,
-                            InfoType::Name,
-                            InfoType::Description,
-                            InfoType::BlockSize,
-                        ],
-                    }),
-                )],
+                known: vec![OptionRequest::Go(GoRequest{
+                    name: Some("test".to_string()),
+                    info_requests: vec![
+                        InfoType::Export,
+                        InfoType::Name,
+                        InfoType::Description,
+                        InfoType::BlockSize,
+                    ],
+                })],
                 unknown: vec![0xff],
             },
         ),
@@ -777,18 +783,15 @@ mod valid_tests {
                 size: 1024,
                 block_size: 512,
                 readonly: true,
-            }, vec![(
-                OptionRequestCode::Go,
-                OptionResponse::Go(GoResponse{
-                    name: Some("foo".to_string()),
-                    info_requests: vec![
-                        InfoType::Export,
-                        InfoType::Name,
-                        InfoType::Description,
-                        InfoType::BlockSize
-                    ],
-                })
-            )]),
+            }, vec![OptionResponse::Go(GoResponse{
+                name: Some("foo".to_string()),
+                info_requests: vec![
+                    InfoType::Export,
+                    InfoType::Name,
+                    InfoType::Description,
+                    InfoType::BlockSize
+                ],
+            })]),
             [
                 // Export
                 //
@@ -914,18 +917,15 @@ mod valid_tests {
         ),
         client_options_roundtrip: (
             Frame::ClientOptions(ClientOptions{
-                known: vec![(
-                    OptionRequestCode::Go,
-                    OptionRequest::Go(GoRequest{
-                        name: Some("test".to_string()),
-                        info_requests: vec![
-                            InfoType::Export,
-                            InfoType::Name,
-                            InfoType::Description,
-                            InfoType::BlockSize,
-                        ],
-                    }),
-                )],
+                known: vec![OptionRequest::Go(GoRequest{
+                    name: Some("test".to_string()),
+                    info_requests: vec![
+                        InfoType::Export,
+                        InfoType::Name,
+                        InfoType::Description,
+                        InfoType::BlockSize,
+                    ],
+                })],
                 unknown: Vec::new(),
             }),
             [

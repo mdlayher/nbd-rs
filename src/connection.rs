@@ -62,7 +62,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             let response = client_options
                 .known
                 .into_iter()
-                .map(|(code, option)| (code, OptionResponse::from(option)))
+                .map(OptionResponse::from)
                 .collect();
 
             // Always send export data, but possibly more data.
