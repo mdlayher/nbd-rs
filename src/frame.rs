@@ -401,14 +401,13 @@ impl Frame {
 
     #[cfg(test)]
     /// Converts a Frame to its associated FrameType.
-    //
-    // TODO(mdlayher): is there a smarter way to do this? impl From?
     fn to_type(&self) -> FrameType {
         match self {
-            Self::ClientFlags(_) => FrameType::ClientFlags,
-            Self::ServerHandshake(_) => FrameType::ServerHandshake,
-            Self::ServerUnsupportedOptions(_) => FrameType::ServerUnsupportedOptions,
-            _ => unimplemented!(),
+            Self::ClientFlags(..) => FrameType::ClientFlags,
+            Self::ClientOptions(..) => FrameType::ClientOptions,
+            Self::ServerHandshake(..) => FrameType::ServerHandshake,
+            Self::ServerOptions(..) => FrameType::ServerOptions,
+            Self::ServerUnsupportedOptions(..) => FrameType::ServerUnsupportedOptions,
         }
     }
 }
