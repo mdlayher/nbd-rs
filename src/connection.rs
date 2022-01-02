@@ -56,10 +56,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
             dbg!(&client_options);
 
-            // May send nothing if the client didn't pass any unknown options.
-            conn.write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
-                .await?;
-
             // For every client known request option, generate the appropriate
             // response.
             let response: Vec<OptionResponse> = client_options
@@ -68,16 +64,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 .map(OptionResponse::from)
                 .collect();
 
-            let start_transmit = response.iter().any(OptionResponse::start_transmit);
+            if response
+                .iter()
+                .any(|option| matches!(option, OptionResponse::Abort))
+            {
+                // Short-circuit; an abort means the server should abort
+                // immediately and ignore any other client data, even if the
+                // request might contain invalid options we would otherwise
+                // reject.
+                conn.write_frame(Frame::ServerOptionsAbort).await?;
+                return Ok(None);
+            }
+
+            // May send nothing if the client didn't pass any unknown options.
+            conn.write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
+                .await?;
+
+            let do_transmit = response.iter().any(OptionResponse::do_transmit);
 
             // Always send export data, but possibly more data.
             conn.write_frame(Frame::ServerOptions(export, response))
                 .await?;
 
-            // Handshake complete, ready for transmission.
-            if start_transmit {
+            if do_transmit {
+                // Handshake complete, ready for transmission.
                 Ok(Some(Self { conn }))
             } else {
+                // No transmission needed, terminate the connection.
                 Ok(None)
             }
         }

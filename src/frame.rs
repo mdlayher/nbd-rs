@@ -18,6 +18,7 @@ pub enum Frame {
     ClientOptions(ClientOptions),
     ServerHandshake(HandshakeFlags),
     ServerOptions(Export, Vec<OptionResponse>),
+    ServerOptionsAbort,
     ServerUnsupportedOptions(Vec<u32>),
 }
 
@@ -75,6 +76,7 @@ pub struct Export {
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
 pub enum OptionRequestCode {
+    Abort = NBD_OPT_ABORT,
     Go = NBD_OPT_GO,
     List = NBD_OPT_LIST,
 }
@@ -82,6 +84,7 @@ pub enum OptionRequestCode {
 /// The contents of known options which a client can send to a server.
 #[derive(Debug, PartialEq)]
 pub enum OptionRequest {
+    Abort,
     Go(GoRequest),
     List,
 }
@@ -90,6 +93,7 @@ pub enum OptionRequest {
 /// client.
 #[derive(Debug, PartialEq)]
 pub enum OptionResponse {
+    Abort,
     Go(GoResponse),
     List(ListResponse),
 }
@@ -97,6 +101,7 @@ pub enum OptionResponse {
 impl From<OptionRequest> for OptionResponse {
     fn from(src: OptionRequest) -> OptionResponse {
         match src {
+            OptionRequest::Abort => OptionResponse::Abort,
             OptionRequest::Go(req) => OptionResponse::Go(req.into()),
             OptionRequest::List => OptionResponse::List(ListResponse()),
         }
@@ -152,6 +157,7 @@ impl OptionRequest {
     /// Returns the associated `OptionRequestCode` for `self`.
     fn code(&self) -> OptionRequestCode {
         match self {
+            Self::Abort => OptionRequestCode::Abort,
             Self::Go(..) => OptionRequestCode::Go,
             Self::List => OptionRequestCode::List,
         }
@@ -160,13 +166,14 @@ impl OptionRequest {
 
 impl OptionResponse {
     /// Reports whether NBD data transmission should begin after this option is processed.
-    pub fn start_transmit(&self) -> bool {
+    pub fn do_transmit(&self) -> bool {
         matches!(self, Self::Go(..))
     }
 
     /// Returns the associated `OptionRequestCode` for `self`.
     fn code(&self) -> OptionRequestCode {
         match self {
+            Self::Abort => OptionRequestCode::Abort,
             Self::Go(..) => OptionRequestCode::Go,
             Self::List(..) => OptionRequestCode::List,
         }
@@ -490,7 +497,7 @@ impl Frame {
                     match option {
                         OptionRequest::Go(go) => go.write(&mut buf)?,
                         // Noop, already wrote the code and body is empty.
-                        OptionRequest::List => {}
+                        OptionRequest::Abort | OptionRequest::List => {}
                     };
 
                     let length = buf.len() as u32;
@@ -506,6 +513,10 @@ impl Frame {
                 dst.write_u64(IHAVEOPT).await?;
                 dst.write_u16(flags.bits()).await?;
             }
+            Frame::ServerOptionsAbort => {
+                // Abort writes a simple acknowledgement and nothing more.
+                Self::ack(dst, OptionRequestCode::Abort).await?;
+            }
             Frame::ServerOptions(export, options) => {
                 if options.is_empty() {
                     // Noop, nothing to write.
@@ -516,16 +527,18 @@ impl Frame {
                 // stream.
                 for option in options {
                     match option {
+                        OptionResponse::Abort => {
+                            // Noop, just acknowledge. It's unlikely this would
+                            // be called due to the existence of
+                            // Frame::ServerOptionsAbort.
+                        }
                         OptionResponse::Go(res) => res.write(dst, export).await?,
                         // TODO(mdlayher): support for multiple exports.
                         OptionResponse::List(res) => res.write(dst, export).await?,
                     }
 
                     // Acknowledge the option was processed.
-                    dst.write_u64(REPLYMAGIC).await?;
-                    dst.write_u32(option.code() as u32).await?;
-                    dst.write_u32(NBD_REP_ACK).await?;
-                    dst.write_u32(0).await?;
+                    Self::ack(dst, option.code()).await?;
                 }
             }
             Frame::ServerUnsupportedOptions(options) => {
@@ -553,6 +566,16 @@ impl Frame {
         Ok(Some(()))
     }
 
+    /// Writes an acknowledgement for `code to `dst`.
+    async fn ack<S: AsyncWrite + Unpin>(dst: &mut S, code: OptionRequestCode) -> io::Result<()> {
+        dst.write_u64(REPLYMAGIC).await?;
+        dst.write_u32(code as u32).await?;
+        dst.write_u32(NBD_REP_ACK).await?;
+        dst.write_u32(0).await?;
+
+        Ok(())
+    }
+
     #[cfg(test)]
     /// Converts a Frame to its associated FrameType.
     fn to_type(&self) -> FrameType {
@@ -560,7 +583,7 @@ impl Frame {
             Self::ClientFlags(..) => FrameType::ClientFlags,
             Self::ClientOptions(..) => FrameType::ClientOptions,
             Self::ServerHandshake(..) => FrameType::ServerHandshake,
-            Self::ServerOptions(..) => FrameType::ServerOptions,
+            Self::ServerOptionsAbort | Self::ServerOptions(..) => FrameType::ServerOptions,
             Self::ServerUnsupportedOptions(..) => FrameType::ServerUnsupportedOptions,
         }
     }
@@ -630,7 +653,8 @@ fn next_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Par
     Ok(match FromPrimitive::from_u32(option_code) {
         Some(option) => ParsedOption::Known(match option {
             OptionRequestCode::Go => OptionRequest::go(src, frame_type)?,
-            // No body, no need to advance src.
+            // These options have no body, no need to advance src.
+            OptionRequestCode::Abort => OptionRequest::Abort,
             OptionRequestCode::List => OptionRequest::List,
         }),
         None => {
@@ -846,6 +870,46 @@ mod valid_tests {
             Frame::ServerHandshake(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
             [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
         ),
+        server_options_abort_full: (
+            Frame::ServerOptions(Export{
+                name: "foo".to_string(),
+                description: "bar".to_string(),
+                size: 256 * MiB,
+                block_size: 512,
+                readonly: true,
+            }, vec![OptionResponse::Abort]),
+            [
+                // Abort acknowledgement
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // List
+                    0, 0, 0, 2,
+                    // NBD_REP_ACK
+                    0, 0, 0, 1,
+                    // Length (empty)
+                    0, 0, 0, 0,
+                ],
+            ].concat(),
+        ),
+        server_options_abort_short: (
+            Frame::ServerOptionsAbort,
+            [
+                // Abort acknowledgement
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // List
+                    0, 0, 0, 2,
+                    // NBD_REP_ACK
+                    0, 0, 0, 1,
+                    // Length (empty)
+                    0, 0, 0, 0,
+                ],
+            ].concat(),
+        ),
         server_options_go_full: (
             Frame::ServerOptions(Export{
                 name: "foo".to_string(),
@@ -1025,6 +1089,23 @@ mod valid_tests {
         client_flags_roundtrip: (
             Frame::ClientFlags(ClientFlags::all()),
             &[0, 0, 0, 1 | 2],
+        ),
+
+        client_options_abort_roundtrip: (
+            Frame::ClientOptions(ClientOptions{
+                known: vec![OptionRequest::Abort],
+                unknown: Vec::new(),
+            }),
+            [
+                // Magic
+                IHAVEOPT_BUF,
+                &[
+                    // Abort
+                    0, 0, 0, 2,
+                    // Abort length
+                    0, 0, 0, 0,
+                ],
+            ].concat(),
         ),
         client_options_go_roundtrip: (
             Frame::ClientOptions(ClientOptions{
