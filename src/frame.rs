@@ -17,7 +17,7 @@ pub enum Frame {
     ClientFlags(ClientFlags),
     ClientOptions(ClientOptions),
     ServerHandshake(HandshakeFlags),
-    ServerOptions(Export, Vec<(OptionRequestCode, OptionRequest)>),
+    ServerOptions(Export, Vec<(OptionRequestCode, OptionResponse)>),
     ServerUnsupportedOptions(Vec<u32>),
 }
 
@@ -78,10 +78,25 @@ pub enum OptionRequestCode {
     Go = NBD_OPT_GO,
 }
 
-/// The contents of known options which can be handled by the server.
+/// The contents of known options which a client can send to a server.
 #[derive(Debug, PartialEq)]
 pub enum OptionRequest {
     Go(GoRequest),
+}
+
+/// The contents of known options which a server can respond to on behalf of a
+/// client.
+#[derive(Debug, PartialEq)]
+pub enum OptionResponse {
+    Go(GoResponse),
+}
+
+impl From<OptionRequest> for OptionResponse {
+    fn from(src: OptionRequest) -> OptionResponse {
+        match src {
+            OptionRequest::Go(req) => OptionResponse::Go(req.into()),
+        }
+    }
 }
 
 impl OptionRequest {
@@ -131,11 +146,27 @@ impl OptionRequest {
     }
 }
 
-/// Data parsed from a Go option.
+/// A Go option as sent by a client.
 #[derive(Debug, PartialEq)]
 pub struct GoRequest {
     pub name: Option<String>,
     pub info_requests: Vec<InfoType>,
+}
+
+/// A Go option as sent by a server in response to a client.
+#[derive(Debug, PartialEq)]
+pub struct GoResponse {
+    pub name: Option<String>,
+    pub info_requests: Vec<InfoType>,
+}
+
+impl From<GoRequest> for GoResponse {
+    fn from(src: GoRequest) -> GoResponse {
+        GoResponse {
+            name: src.name,
+            info_requests: src.info_requests,
+        }
+    }
 }
 
 /// Denotes the type of an information request from a client.
@@ -149,21 +180,37 @@ pub enum InfoType {
 }
 
 impl GoRequest {
-    /// Writes the reply to a `GoRequest` to `dst`.
-    ///
-    /// # Panics
-    /// At least one value must be present in `info_requests`.
-    pub async fn reply<S: AsyncWrite + Unpin>(
+    /// Writes the request bytes for a `GoRequest` to `dst.`
+    //
+    // TODO(mdlayher): there's no real reason for this to be async other than
+    // having access to write_u32 and friends because we are writing to an
+    // in-memory vector. Consider investigating.
+    pub async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<()> {
+        let name = if let Some(name) = &self.name {
+            name.as_bytes()
+        } else {
+            &[]
+        };
+
+        dst.write_u32(name.len() as u32).await?;
+        dst.write_all(name).await?;
+
+        dst.write_u16(self.info_requests.len() as u16).await?;
+        for info_request in &self.info_requests {
+            dst.write_u16(*info_request as u16).await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl GoResponse {
+    /// Writes the bytes for a `GoResponse` to `dst`.
+    pub async fn write<S: AsyncWrite + Unpin>(
         &self,
         dst: &mut S,
         export: &Export,
     ) -> io::Result<()> {
-        // We always send export info at a minimum.
-        assert!(
-            !self.info_requests.is_empty(),
-            "no info_requests were set for GoRequest reply"
-        );
-
         for info in &self.info_requests {
             // Each info request reply is prefixed with magic and the Go code.
             dst.write_u64(REPLYMAGIC).await?;
@@ -186,9 +233,9 @@ impl GoRequest {
                     }
                     dst.write_u16(flags.bits()).await?;
                 }
-                InfoType::Name => Self::reply_string(dst, *info, &export.name).await?,
+                InfoType::Name => Self::write_string(dst, *info, &export.name).await?,
                 InfoType::Description => {
-                    Self::reply_string(dst, *info, &export.description).await?
+                    Self::write_string(dst, *info, &export.description).await?
                 }
                 InfoType::BlockSize => {
                     // Fixed size of 14 bytes for block size.
@@ -210,7 +257,7 @@ impl GoRequest {
     }
 
     /// Writes a string and its associated `InfoType` to `dst`.
-    async fn reply_string<S: AsyncWrite + Unpin>(
+    async fn write_string<S: AsyncWrite + Unpin>(
         dst: &mut S,
         info_type: InfoType,
         string: &str,
@@ -223,29 +270,6 @@ impl GoRequest {
         dst.write_u32(length).await?;
         dst.write_u16(info_type as u16).await?;
         dst.write_all(string.as_bytes()).await?;
-
-        Ok(())
-    }
-
-    /// Writes the request bytes for a `GoRequest` to `dst.`
-    //
-    // TODO(mdlayher): there's no real reason for this to be async other than
-    // having access to write_u32 and friends because we are writing to an
-    // in-memory vector. Consider investigating.
-    pub async fn request<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<()> {
-        let name = if let Some(name) = &self.name {
-            name.as_bytes()
-        } else {
-            &[]
-        };
-
-        dst.write_u32(name.len() as u32).await?;
-        dst.write_all(name).await?;
-
-        dst.write_u16(self.info_requests.len() as u16).await?;
-        for info_request in &self.info_requests {
-            dst.write_u16(*info_request as u16).await?;
-        }
 
         Ok(())
     }
@@ -389,7 +413,7 @@ impl Frame {
                     // stream.
                     let mut buf = vec![];
                     match option {
-                        OptionRequest::Go(go) => go.request(&mut buf).await?,
+                        OptionRequest::Go(go) => go.write(&mut buf).await?,
                     };
 
                     dst.write_u32(buf.len() as u32).await?;
@@ -408,10 +432,11 @@ impl Frame {
                     return Ok(None);
                 }
 
-                // Iterate through each valid option and reply to them.
+                // Iterate through each option and write its bytes to the
+                // stream.
                 for (code, option) in options {
                     match option {
-                        OptionRequest::Go(req) => req.reply(dst, export).await?,
+                        OptionResponse::Go(res) => res.write(dst, export).await?,
                     }
 
                     // Acknowledge the option was processed.
@@ -756,7 +781,7 @@ mod valid_tests {
                 readonly: true,
             }, vec![(
                 OptionRequestCode::Go,
-                OptionRequest::Go(GoRequest{
+                OptionResponse::Go(GoResponse{
                     name: Some("foo".to_string()),
                     info_requests: vec![
                         InfoType::Export,

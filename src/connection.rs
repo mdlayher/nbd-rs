@@ -57,8 +57,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             conn.write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
                 .await?;
 
+            // For every client known request option, generate the appropriate
+            // response.
+            let response = client_options
+                .known
+                .into_iter()
+                .map(|(code, option)| (code, OptionResponse::from(option)))
+                .collect();
+
             // Always send export data, but possibly more data.
-            conn.write_frame(Frame::ServerOptions(export, client_options.known))
+            conn.write_frame(Frame::ServerOptions(export, response))
                 .await?;
         }
 
