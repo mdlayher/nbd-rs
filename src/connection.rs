@@ -16,7 +16,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     ///
     /// If the client wishes to read data from the server without initiating the
     /// data transmission phase, `Ok(None)` will be returned.
-    pub async fn handshake<'a>(stream: S, export: &'a Export<'a>) -> crate::Result<Option<Self>> {
+    pub async fn handshake(stream: S, export: &Export<'_>) -> crate::Result<Option<Self>> {
         let mut conn = RawConnection::new(stream);
 
         // Send opening handshake, verify client flags.
