@@ -16,7 +16,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     ///
     /// If the client wishes to read data from the server without initiating the
     /// data transmission phase, `Ok(None)` will be returned.
-    pub async fn handshake(stream: S, export: Export) -> crate::Result<Option<Self>> {
+    pub async fn handshake<'a>(stream: S, export: &'a Export<'a>) -> crate::Result<Option<Self>> {
         let mut conn = RawConnection::new(stream);
 
         // Send opening handshake, verify client flags.
@@ -57,11 +57,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             dbg!(&client_options);
 
             // For every client known request option, generate the appropriate
-            // response.
+            // response. Many of these responses will return information about
+            // the current export.
             let response: Vec<OptionResponse> = client_options
                 .known
                 .into_iter()
-                .map(OptionResponse::from)
+                .map(|request| OptionResponse::from_request(request, export))
                 .collect();
 
             if response
@@ -82,9 +83,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
             let do_transmit = response.iter().any(OptionResponse::do_transmit);
 
-            // Always send export data, but possibly more data.
-            conn.write_frame(Frame::ServerOptions(export, response))
-                .await?;
+            // Respond to known options.
+            conn.write_frame(Frame::ServerOptions(response)).await?;
 
             if do_transmit {
                 // Handshake complete, ready for transmission.
@@ -128,7 +128,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 
     /// Reads a single `Frame` of the specified `FrameType` from the underlying
     /// stream.
-    async fn read_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
+    async fn read_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame<'_>>> {
         loop {
             if let Some(frame) = self.parse_frame(frame_type)? {
                 // We read enough data to parse an entire frame, return it now.
@@ -149,7 +149,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     }
 
     /// Write a single `Frame` value to the underlying stream.
-    async fn write_frame(&mut self, frame: Frame) -> io::Result<()> {
+    async fn write_frame(&mut self, frame: Frame<'_>) -> io::Result<()> {
         if frame.write(&mut self.stream).await?.is_some() {
             // Wrote a frame, flush it now.
             self.stream.flush().await
@@ -160,7 +160,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 
     /// Try to parse a single `Frame` but also terminate early with an
     /// incomplete error if we need to read more data from the stream.
-    fn parse_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
+    fn parse_frame<'a>(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame<'a>>> {
         use frame::Error::Incomplete;
 
         // Begin checking the data we have buffered and see if we can return an
@@ -210,8 +210,8 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let export = Export {
-                name: "foo".to_string(),
-                description: "bar".to_string(),
+                name: "foo",
+                description: "bar",
                 size: 256 * MiB,
                 block_size: 512,
                 readonly: true,
@@ -220,7 +220,7 @@ mod tests {
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
             // TODO(mdlayher): make tests for data transmission phase later.
-            let conn = Connection::handshake(socket, export)
+            let conn = Connection::handshake(socket, &export)
                 .await
                 .expect("failed to perform server handshake");
 

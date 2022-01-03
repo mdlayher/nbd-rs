@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
 extern crate nbd_rs;
@@ -14,25 +15,26 @@ async fn main() {
         .await
         .expect("failed to listen");
 
+    // TODO(mdlayher): allow multiple exports, lock export per client.
+    let export = Arc::new(Export {
+        name: "mdlayher nbd-rs",
+        description: "An NBD server written in Rust",
+        size: 256 * MiB,
+        block_size: 512,
+        readonly: true,
+    });
+
     loop {
         let (socket, addr) = listener.accept().await.expect("failed to accept");
 
+        let export = export.clone();
         tokio::spawn(async move {
-            // TODO(mdlayher): allow multiple exports, lock export per client?
-            let export = Export {
-                name: "mdlayher nbd-rs".to_string(),
-                description: "An NBD server written in Rust".to_string(),
-                size: 256 * MiB,
-                block_size: 512,
-                readonly: true,
-            };
-
-            process(socket, addr, export).await;
+            process(socket, addr, &export).await;
         });
     }
 }
 
-async fn process(socket: TcpStream, addr: SocketAddr, export: Export) {
+async fn process(socket: TcpStream, addr: SocketAddr, export: &Export<'_>) {
     let mut conn = match Connection::handshake(socket, export).await {
         Ok(conn) => match conn {
             Some(conn) => conn,

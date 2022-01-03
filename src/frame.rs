@@ -13,11 +13,11 @@ use crate::consts::*;
 /// here do not necessarily correspond to the NBD specification, but are used to
 /// chunk up logical operations in this library.
 #[derive(Debug, PartialEq)]
-pub enum Frame {
+pub enum Frame<'a> {
     ClientFlags(ClientFlags),
     ClientOptions(ClientOptions),
     ServerHandshake(HandshakeFlags),
-    ServerOptions(Export, Vec<OptionResponse>),
+    ServerOptions(Vec<OptionResponse<'a>>),
     ServerOptionsAbort,
     ServerUnsupportedOptions(Vec<u32>),
 }
@@ -64,9 +64,9 @@ pub struct ClientOptions {
 
 /// Information about the Network Block Device being served.
 #[derive(Debug, Default, PartialEq)]
-pub struct Export {
-    pub name: String,
-    pub description: String,
+pub struct Export<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
     pub size: u64,
     pub block_size: u32,
     pub readonly: bool,
@@ -97,22 +97,11 @@ pub enum OptionRequest {
 /// The contents of known options which a server can respond to on behalf of a
 /// client.
 #[derive(Debug, PartialEq)]
-pub enum OptionResponse {
+pub enum OptionResponse<'a> {
     Abort,
-    Go(GoResponse),
-    Info(GoResponse),
-    List(ListResponse),
-}
-
-impl From<OptionRequest> for OptionResponse {
-    fn from(src: OptionRequest) -> OptionResponse {
-        match src {
-            OptionRequest::Abort => OptionResponse::Abort,
-            OptionRequest::Go(req) => OptionResponse::Go(req.into()),
-            OptionRequest::Info(req) => OptionResponse::Info(req.into()),
-            OptionRequest::List => OptionResponse::List(ListResponse()),
-        }
-    }
+    Go(GoResponse<'a>),
+    Info(GoResponse<'a>),
+    List(ListResponse<'a>),
 }
 
 impl OptionRequest {
@@ -173,7 +162,28 @@ impl OptionRequest {
     }
 }
 
-impl OptionResponse {
+impl<'a> OptionResponse<'a> {
+    /// Converts an `OptionRequest` into the matching `OptionResponse` while
+    /// also associating additional data such as the `Export` being served.
+    //
+    // TODO(mdlayher): multiple exports and a way to determine the default.
+    pub fn from_request(src: OptionRequest, export: &'a Export) -> Self {
+        match src {
+            OptionRequest::Abort => OptionResponse::Abort,
+            OptionRequest::Go(req) => OptionResponse::Go(GoResponse {
+                name: req.name,
+                info_requests: req.info_requests,
+                export,
+            }),
+            OptionRequest::Info(req) => OptionResponse::Info(GoResponse {
+                name: req.name,
+                info_requests: req.info_requests,
+                export,
+            }),
+            OptionRequest::List => OptionResponse::List(ListResponse(vec![export])),
+        }
+    }
+
     /// Reports whether NBD data transmission should begin after this option is processed.
     pub fn do_transmit(&self) -> bool {
         matches!(self, Self::Go(..))
@@ -199,18 +209,10 @@ pub struct GoRequest {
 
 /// A Go option as sent by a server in response to a client.
 #[derive(Debug, PartialEq)]
-pub struct GoResponse {
+pub struct GoResponse<'a> {
     pub name: Option<String>,
     pub info_requests: Vec<InfoType>,
-}
-
-impl From<GoRequest> for GoResponse {
-    fn from(src: GoRequest) -> GoResponse {
-        GoResponse {
-            name: src.name,
-            info_requests: src.info_requests,
-        }
-    }
+    pub export: &'a Export<'a>,
 }
 
 /// Denotes the type of an information request from a client.
@@ -255,13 +257,12 @@ enum GoResponseCode {
     Info = OptionCode::Info as u32,
 }
 
-impl GoResponse {
+impl GoResponse<'_> {
     /// Writes the bytes for a `GoResponse` to `dst` with the specified `code`,
     async fn write<S: AsyncWrite + Unpin>(
         &self,
         dst: &mut S,
         code: GoResponseCode,
-        export: &Export,
     ) -> io::Result<()> {
         for info in &self.info_requests {
             // Each info request reply is prefixed with magic and the Go code.
@@ -276,18 +277,18 @@ impl GoResponse {
 
                     // Export info type, export size.
                     dst.write_u16(*info as u16).await?;
-                    dst.write_u64(export.size).await?;
+                    dst.write_u64(self.export.size).await?;
 
                     // Always set flags, optionally mark read-only.
                     let mut flags = TransmissionFlags::HAS_FLAGS;
-                    if export.readonly {
+                    if self.export.readonly {
                         flags |= TransmissionFlags::READ_ONLY;
                     }
                     dst.write_u16(flags.bits()).await?;
                 }
-                InfoType::Name => Self::write_string(dst, *info, &export.name).await?,
+                InfoType::Name => Self::write_string(dst, *info, self.export.name).await?,
                 InfoType::Description => {
-                    Self::write_string(dst, *info, &export.description).await?
+                    Self::write_string(dst, *info, self.export.description).await?
                 }
                 InfoType::BlockSize => {
                     // Fixed size of 14 bytes for block size.
@@ -299,7 +300,7 @@ impl GoResponse {
                     // export fields? For now we specify the same value for
                     // each.
                     for _ in 0..3 {
-                        dst.write_u32(export.block_size).await?;
+                        dst.write_u32(self.export.block_size).await?;
                     }
                 }
             }
@@ -327,19 +328,16 @@ impl GoResponse {
     }
 }
 
-/// A List option as sent by a server in response to a client. This type
-/// contains no data of its own but exists to hold methods for writing export
-/// data lists to clients.
+/// A List option as sent by a server in response to a client, containing data
+/// about each `Export` this server can serve.
 #[derive(Debug, PartialEq)]
-pub struct ListResponse();
+pub struct ListResponse<'a>(pub Vec<&'a Export<'a>>);
 
-impl ListResponse {
+impl ListResponse<'_> {
     /// Writes the bytes describing `export` to `dst`.
-    async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S, export: &Export) -> io::Result<()> {
+    async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<()> {
         // Each export reply is prefixed with magic and the List code.
-        //
-        // TODO(mdlayher): support for passing in multiple exports.
-        for export in [export] {
+        for export in &self.0 {
             dst.write_u64(REPLYMAGIC).await?;
             dst.write_u32(OptionCode::List as u32).await?;
 
@@ -373,7 +371,7 @@ impl ListResponse {
     }
 }
 
-impl Frame {
+impl Frame<'_> {
     /// Determines if enough data is available to parse a `Frame` of the given
     /// `FrameType` from `src`.
     pub fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
@@ -418,7 +416,7 @@ impl Frame {
     }
 
     /// Parses the next `Frame` according to the given `FrameType`.
-    pub fn parse(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
+    pub fn parse<'a>(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame<'a>> {
         match frame_type {
             FrameType::ClientFlags => {
                 let flags =
@@ -533,7 +531,7 @@ impl Frame {
                 // Abort writes a simple acknowledgement and nothing more.
                 Self::ack(dst, OptionCode::Abort).await?;
             }
-            Frame::ServerOptions(export, options) => {
+            Frame::ServerOptions(options) => {
                 if options.is_empty() {
                     // Noop, nothing to write.
                     return Ok(None);
@@ -548,14 +546,9 @@ impl Frame {
                             // be called due to the existence of
                             // Frame::ServerOptionsAbort.
                         }
-                        OptionResponse::Go(res) => {
-                            res.write(dst, GoResponseCode::Go, export).await?
-                        }
-                        OptionResponse::Info(res) => {
-                            res.write(dst, GoResponseCode::Info, export).await?
-                        }
-                        // TODO(mdlayher): support for multiple exports.
-                        OptionResponse::List(res) => res.write(dst, export).await?,
+                        OptionResponse::Go(res) => res.write(dst, GoResponseCode::Go).await?,
+                        OptionResponse::Info(res) => res.write(dst, GoResponseCode::Info).await?,
+                        OptionResponse::List(res) => res.write(dst).await?,
                     }
 
                     // Acknowledge the option was processed.
@@ -750,6 +743,15 @@ impl fmt::Display for Error {
 mod valid_tests {
     use super::*;
 
+    /// A synthetic export reused throughout all of the tests.
+    const TEST_EXPORT: Export = Export {
+        name: "foo",
+        description: "bar",
+        size: 256 * MiB,
+        block_size: 512,
+        readonly: true,
+    };
+
     macro_rules! frame_read_tests {
         ($($name:ident: $type:path: $value:expr,)*) => {
         $(
@@ -923,13 +925,7 @@ mod valid_tests {
             [NBDMAGIC_BUF, IHAVEOPT_BUF, &[0, 1 | 2]].concat(),
         ),
         server_options_abort_full: (
-            Frame::ServerOptions(Export{
-                name: "foo".to_string(),
-                description: "bar".to_string(),
-                size: 256 * MiB,
-                block_size: 512,
-                readonly: true,
-            }, vec![OptionResponse::Abort]),
+            Frame::ServerOptions(vec![OptionResponse::Abort]),
             [
                 // Abort acknowledgement
                 //
@@ -963,13 +959,7 @@ mod valid_tests {
             ].concat(),
         ),
         server_options_go_full: (
-            Frame::ServerOptions(Export{
-                name: "foo".to_string(),
-                description: "bar".to_string(),
-                size: 1024,
-                block_size: 512,
-                readonly: true,
-            }, vec![OptionResponse::Go(GoResponse{
+            Frame::ServerOptions(vec![OptionResponse::Go(GoResponse{
                 name: Some("foo".to_string()),
                 info_requests: vec![
                     InfoType::Export,
@@ -977,6 +967,7 @@ mod valid_tests {
                     InfoType::Description,
                     InfoType::BlockSize
                 ],
+                export: &TEST_EXPORT,
             })]),
             [
                 // Export
@@ -993,7 +984,7 @@ mod valid_tests {
                     // Export info type
                     0, 0,
                     // Size
-                    0, 0, 0, 0, 0, 0, 4, 0,
+                    0, 0, 0, 0, 16, 0, 0, 0,
                     // Transmission flags
                     0, 1 | 2,
                 ],
@@ -1066,15 +1057,10 @@ mod valid_tests {
         // Just test the bare minimum for Info since it shares almost all code
         // with Go.
         server_options_info_minimal: (
-            Frame::ServerOptions(Export{
-                name: "foo".to_string(),
-                description: "bar".to_string(),
-                size: 1024,
-                block_size: 512,
-                readonly: true,
-            }, vec![OptionResponse::Info(GoResponse{
+            Frame::ServerOptions(vec![OptionResponse::Info(GoResponse{
                 name: Some("foo".to_string()),
                 info_requests: vec![InfoType::Export],
+                export: &TEST_EXPORT,
             })]),
             [
                 // Export
@@ -1091,7 +1077,7 @@ mod valid_tests {
                     // Export info type
                     0, 0,
                     // Size
-                    0, 0, 0, 0, 0, 0, 4, 0,
+                    0, 0, 0, 0, 16, 0, 0, 0,
                     // Transmission flags
                     0, 1 | 2,
                 ],
@@ -1110,13 +1096,7 @@ mod valid_tests {
             ].concat(),
         ),
         server_options_list_full: (
-            Frame::ServerOptions(Export{
-                name: "foo".to_string(),
-                description: "bar".to_string(),
-                size: 256 * MiB,
-                block_size: 512,
-                readonly: true,
-            }, vec![OptionResponse::List(ListResponse())]),
+            Frame::ServerOptions(vec![OptionResponse::List(ListResponse(vec![&TEST_EXPORT]))]),
             [
                 // List
                 //
@@ -1350,7 +1330,7 @@ mod valid_tests {
 
     frame_write_none_tests! {
         client_options_none: Frame::ClientOptions(ClientOptions{known: Vec::new(), unknown: Vec::new()}),
-        server_options_none: Frame::ServerOptions(Export::default(), Vec::new()),
+        server_options_none: Frame::ServerOptions(Vec::new()),
         server_unsupported_options_none: Frame::ServerUnsupportedOptions(Vec::new()),
     }
 }
