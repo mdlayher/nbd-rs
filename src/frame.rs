@@ -91,6 +91,35 @@ pub struct Export {
     pub readonly: bool,
 }
 
+/// The `Export(s)` which can be served by a server. The first export becomes
+/// the default export for clients which do not request the use of a specific
+/// export. Any additional exports must be referred to by name.
+#[derive(Debug, PartialEq)]
+pub struct Exports(Export, Vec<Export>);
+
+impl Exports {
+    /// Serves a single `Export` as the default export.
+    pub fn single(export: Export) -> Self {
+        Self(export, vec![])
+    }
+
+    /// Serves `default` as the default `Export`, but also serves zero or more
+    /// additional `Exports` which can be queried by name.
+    pub fn multiple(default: Export, exports: Vec<Export>) -> Self {
+        Self(default, exports)
+    }
+}
+
+impl From<&Exports> for Vec<ListExport> {
+    /// Flattens `Exports` into a format suitable for `Vec<ListExport>`.
+    fn from(src: &Exports) -> Self {
+        let mut list = Vec::with_capacity(1 + src.1.len());
+        list.push(src.0.clone().into());
+        list.extend(src.1.iter().map(|export| export.clone().into()));
+        list
+    }
+}
+
 /// Denotes the type of known options which can be handled by the server.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
@@ -183,21 +212,50 @@ impl OptionRequest {
 
 impl OptionResponse {
     /// Converts an `OptionRequest` into the matching `OptionResponse` while
-    /// also associating additional data such as the `Export` being served.
-    //
-    // TODO(mdlayher): multiple exports and a way to determine the default.
-    pub fn from_request(src: OptionRequest, export: Export) -> Self {
+    /// also associating additional data such as the `Exports` being served.
+    pub fn from_request(src: OptionRequest, exports: &Exports) -> Self {
         match src {
-            OptionRequest::Abort => OptionResponse::Abort,
-            OptionRequest::Go(req) => OptionResponse::Go(GoResponse {
+            OptionRequest::Abort => Self::Abort,
+            OptionRequest::Go(req) => Self::Go(Self::go(req, exports)),
+            OptionRequest::Info(req) => Self::Info(Self::go(req, exports)),
+            OptionRequest::List => Self::List(ListResponse(exports.into())),
+        }
+    }
+
+    /// Produces the appropriate `GoResponse` for a `GoRequest` which may ask
+    /// for a specifid `Export`.
+    fn go(req: GoRequest, exports: &Exports) -> GoResponse {
+        match req.name {
+            Some(name) => {
+                if name == exports.0.name {
+                    // Name matches the default, use it.
+                    return GoResponse::Ok {
+                        info_requests: req.info_requests,
+                        export: exports.0.clone(),
+                    };
+                }
+
+                // Name must match one of the extra exports or we return unknown
+                // export to the client.
+                let matched: Vec<&Export> = exports
+                    .1
+                    .iter()
+                    .filter(|export| export.name == name)
+                    .collect();
+
+                match &matched[..] {
+                    [export] => GoResponse::Ok {
+                        info_requests: req.info_requests,
+                        export: (*export).clone(),
+                    },
+                    _ => GoResponse::Unknown(format!("export not found: {}", name)),
+                }
+            }
+            // Use the default export.
+            None => GoResponse::Ok {
                 info_requests: req.info_requests,
-                export,
-            }),
-            OptionRequest::Info(req) => OptionResponse::Info(GoResponse {
-                info_requests: req.info_requests,
-                export,
-            }),
-            OptionRequest::List => OptionResponse::List(ListResponse(vec![export.into()])),
+                export: exports.0.clone(),
+            },
         }
     }
 
@@ -226,9 +284,12 @@ pub struct GoRequest {
 
 /// A Go option as sent by a server in response to a client.
 #[derive(Debug, PartialEq)]
-pub struct GoResponse {
-    pub info_requests: Vec<InfoType>,
-    pub export: Export,
+pub enum GoResponse {
+    Ok {
+        info_requests: Vec<InfoType>,
+        export: Export,
+    },
+    Unknown(String),
 }
 
 /// Denotes the type of an information request from a client.
@@ -267,7 +328,7 @@ impl GoRequest {
 /// Used to differentiate between Go and Info when necessary, since the two
 /// carry identical frame data.
 #[repr(u32)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum GoOrInfo {
     Go = OptionCode::Go as u32,
     Info = OptionCode::Info as u32,
@@ -276,47 +337,71 @@ enum GoOrInfo {
 impl GoResponse {
     /// Writes the bytes for a `GoResponse` to `dst` with the specified `code`,
     async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S, code: GoOrInfo) -> io::Result<()> {
-        for info in &self.info_requests {
-            // Each info request reply is prefixed with magic and the Go code.
-            dst.write_u64(REPLYMAGIC).await?;
-            dst.write_u32(code as u32).await?;
+        match self {
+            Self::Ok {
+                info_requests,
+                export,
+            } => {
+                for info in info_requests {
+                    dst.write_u64(REPLYMAGIC).await?;
+                    dst.write_u32(code as u32).await?;
 
-            match *info {
-                InfoType::Export => {
-                    // Fixed size of 10 bytes for export info.
-                    dst.write_u32(NBD_REP_INFO).await?;
-                    dst.write_u32(2 + 8 + 2).await?;
+                    match *info {
+                        InfoType::Export => {
+                            // Fixed size of 10 bytes for export info.
+                            dst.write_u32(NBD_REP_INFO).await?;
+                            dst.write_u32(2 + 8 + 2).await?;
 
-                    // Export info type, export size.
-                    dst.write_u16(*info as u16).await?;
-                    dst.write_u64(self.export.size).await?;
+                            // Export info type, export size.
+                            dst.write_u16(*info as u16).await?;
+                            dst.write_u64(export.size).await?;
 
-                    // Always set flags, optionally mark read-only.
-                    let mut flags = TransmissionFlags::HAS_FLAGS;
-                    if self.export.readonly {
-                        flags |= TransmissionFlags::READ_ONLY;
+                            // Always set flags, optionally mark read-only.
+                            let mut flags = TransmissionFlags::HAS_FLAGS;
+                            if export.readonly {
+                                flags |= TransmissionFlags::READ_ONLY;
+                            }
+                            dst.write_u16(flags.bits()).await?;
+                        }
+                        InfoType::Name => Self::write_string(dst, *info, &export.name).await?,
+                        InfoType::Description => {
+                            Self::write_string(dst, *info, &export.description).await?
+                        }
+                        InfoType::BlockSize => {
+                            // Fixed size of 14 bytes for block size.
+                            dst.write_u32(NBD_REP_INFO).await?;
+                            dst.write_u32(2 + (4 * 3)).await?;
+                            dst.write_u16(*info as u16).await?;
+
+                            // TODO(mdlayher): break out
+                            // minimum/preferred/maximum into export fields.
+                            for _ in 0..3 {
+                                dst.write_u32(export.block_size).await?;
+                            }
+                        }
                     }
-                    dst.write_u16(flags.bits()).await?;
                 }
-                InfoType::Name => Self::write_string(dst, *info, &self.export.name).await?,
-                InfoType::Description => {
-                    Self::write_string(dst, *info, &self.export.description).await?
-                }
-                InfoType::BlockSize => {
-                    // Fixed size of 14 bytes for block size.
-                    dst.write_u32(NBD_REP_INFO).await?;
-                    dst.write_u32(2 + (4 * 3)).await?;
-                    dst.write_u16(*info as u16).await?;
 
-                    // TODO(mdlayher): break out minimum/preferred/maximum into
-                    // export fields? For now we specify the same value for
-                    // each.
-                    for _ in 0..3 {
-                        dst.write_u32(self.export.block_size).await?;
-                    }
-                }
+                let option = match code {
+                    GoOrInfo::Go => OptionCode::Go,
+                    GoOrInfo::Info => OptionCode::Info,
+                };
+
+                Frame::ack(dst, option).await?;
             }
-        }
+            Self::Unknown(message) => {
+                dst.write_u64(REPLYMAGIC).await?;
+                dst.write_u32(code as u32).await?;
+
+                // Unknown export, return an error message.
+                dst.write_u32(NBD_REP_ERR_UNKNOWN).await?;
+
+                let length = message.len() as u32;
+
+                dst.write_u32(length).await?;
+                dst.write_all(message.as_bytes()).await?;
+            }
+        };
 
         Ok(())
     }
@@ -394,6 +479,7 @@ impl ListResponse {
             dst.write_all(export.metadata.as_bytes()).await?;
         }
 
+        Frame::ack(dst, OptionCode::List).await?;
         Ok(())
     }
 }
@@ -601,14 +687,12 @@ impl Frame {
                             // Noop, just acknowledge. It's unlikely this would
                             // be called due to the existence of
                             // Frame::ServerOptionsAbort.
+                            Self::ack(dst, option.code()).await?;
                         }
                         OptionResponse::Go(res) => res.write(dst, GoOrInfo::Go).await?,
                         OptionResponse::Info(res) => res.write(dst, GoOrInfo::Info).await?,
                         OptionResponse::List(res) => res.write(dst).await?,
                     }
-
-                    // Acknowledge the option was processed.
-                    Self::ack(dst, option.code()).await?;
                 }
             }
             Frame::ServerUnsupportedOptions(options) => {
@@ -780,6 +864,13 @@ fn next_server_option(
         [.., OptionFragment::InfoDone] => {
             Ok(ParsedResponse::go(GoOrInfo::Info, fragments, frame_type)?)
         }
+        // Go and Info, but error cases.
+        [OptionFragment::GoError(name)] => Ok(ParsedResponse::Known(OptionResponse::Go(
+            GoResponse::Unknown(name.to_string()),
+        ))),
+        [OptionFragment::InfoError(name)] => Ok(ParsedResponse::Known(OptionResponse::Info(
+            GoResponse::Unknown(name.to_string()),
+        ))),
         // One or more unknown fragments.
         [OptionFragment::Unknown(_)] | [.., OptionFragment::Unknown(_)] => {
             let mut codes = Vec::new();
@@ -834,11 +925,11 @@ impl ParsedResponse {
         }
 
         Ok(ParsedResponse::Known(match option {
-            GoOrInfo::Go => OptionResponse::Go(GoResponse {
+            GoOrInfo::Go => OptionResponse::Go(GoResponse::Ok {
                 info_requests,
                 export,
             }),
-            GoOrInfo::Info => OptionResponse::Info(GoResponse {
+            GoOrInfo::Info => OptionResponse::Info(GoResponse::Ok {
                 info_requests,
                 export,
             }),
@@ -860,7 +951,9 @@ enum OptionFragment {
     Abort,
     Go(GoFragment),
     GoDone,
+    GoError(String),
     InfoDone,
+    InfoError(String),
     List(ListExport),
     ListDone,
     Unknown(u32),
@@ -960,6 +1053,22 @@ impl<'a, 'b> OptionFragmentParser<'a, 'b> {
     /// Produces an `OptionFragment` related to a `Go` or `Info` option,
     /// depending on the value of `option`.
     fn go(&mut self, option: GoOrInfo, reply_code: u32, length: usize) -> Result<OptionFragment> {
+        // TODO(mdlayher): more robust handling of error reply codes is
+        // necessary, we have to check for various cases and return better enum
+        // types.
+
+        if reply_code == NBD_REP_ERR_UNKNOWN {
+            // An unknown export error, read the literal string and note that we
+            // are done parsing.
+            self.done = true;
+            let error = self.read_string(length)?;
+
+            return match option {
+                GoOrInfo::Go => Ok(OptionFragment::GoError(error)),
+                GoOrInfo::Info => Ok(OptionFragment::InfoError(error)),
+            };
+        }
+
         if self.done {
             // Important: must return the correct type for parsing to work
             // later.
@@ -1344,7 +1453,7 @@ mod valid_tests {
         ),
         server_options_go_full: (
             Frame::ServerOptions(ServerOptions {
-                known: vec![OptionResponse::Go(GoResponse{
+                known: vec![OptionResponse::Go(GoResponse::Ok {
                     info_requests: vec![
                         InfoType::Export,
                         InfoType::Name,
@@ -1444,7 +1553,7 @@ mod valid_tests {
         // with Go.
         server_options_info_minimal: (
             Frame::ServerOptions(ServerOptions{
-                known: vec![OptionResponse::Info(GoResponse{
+                known: vec![OptionResponse::Info(GoResponse::Ok {
                     info_requests: vec![InfoType::Export],
                     export: test_export(),
                 })],
@@ -1699,7 +1808,7 @@ mod valid_tests {
             Frame::ServerOptions(ServerOptions{
                 known: vec![
                     OptionResponse::Abort,
-                    OptionResponse::Go(GoResponse{
+                    OptionResponse::Go(GoResponse::Ok {
                         info_requests: vec![
                             InfoType::Export,
                             InfoType::Name,
@@ -1708,7 +1817,7 @@ mod valid_tests {
                         ],
                         export: test_export(),
                     }),
-                    OptionResponse::Info(GoResponse{
+                    OptionResponse::Info(GoResponse::Ok {
                         info_requests: vec![InfoType::Export],
                         export: Export{
                             size: 256*MiB,
@@ -1720,6 +1829,8 @@ mod valid_tests {
                         name: "foo".to_string(),
                         metadata: "bar (size: 256MiB, block size: 512B)".to_string(),
                     }])),
+                    OptionResponse::Go(GoResponse::Unknown("not found".to_string())),
+                    OptionResponse::Info(GoResponse::Unknown("not found".to_string())),
                 ],
                 // Unknown options cannot be set for roundtrip.
                 unknown: vec![],
@@ -1883,6 +1994,32 @@ mod valid_tests {
                     // Length (empty)
                     0, 0, 0, 0,
                 ],
+                // Go error
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Go
+                    0, 0, 0, 7,
+                    // NBD_REP_ERR_UNKNOWN
+                    0x80, 0, 0, 6,
+                    // Length
+                    0, 0, 0, 9,
+                ],
+                b"not found",
+                // Info error
+                //
+                // Magic
+                REPLYMAGIC_BUF,
+                &[
+                    // Info
+                    0, 0, 0, 6,
+                    // NBD_REP_ERR_UNKNOWN
+                    0x80, 0, 0, 6,
+                    // Length
+                    0, 0, 0, 9,
+                ],
+                b"not found",
             ].concat(),
         ),
         server_unsupported_options_roundtrip: (

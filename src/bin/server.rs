@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
 extern crate nbd_rs;
-use nbd_rs::{Connection, Export};
+use nbd_rs::{Connection, Export, Exports};
 
 /// A symbolic constant for 1 MiB.
 #[allow(non_upper_case_globals)]
@@ -16,26 +16,26 @@ async fn main() {
         .expect("failed to listen");
 
     // TODO(mdlayher): allow multiple exports, lock export per client.
-    let export = Arc::new(Export {
+    let exports = Arc::new(Exports::single(Export {
         name: "mdlayher nbd-rs".to_string(),
         description: "An NBD server written in Rust".to_string(),
         size: 256 * MiB,
         block_size: 512,
         readonly: true,
-    });
+    }));
 
     loop {
         let (socket, addr) = listener.accept().await.expect("failed to accept");
 
-        let export = export.clone();
+        let exports = exports.clone();
         tokio::spawn(async move {
-            process(socket, addr, &export).await;
+            process(socket, addr, &exports).await;
         });
     }
 }
 
-async fn process(socket: TcpStream, addr: SocketAddr, export: &Export) {
-    let mut conn = match Connection::handshake(socket, export).await {
+async fn process(socket: TcpStream, addr: SocketAddr, exports: &Exports) {
+    let mut conn = match Connection::handshake(socket, exports).await {
         Ok(conn) => match conn {
             Some(conn) => conn,
             None => {

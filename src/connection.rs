@@ -16,7 +16,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     ///
     /// If the client wishes to read data from the server without initiating the
     /// data transmission phase, `Ok(None)` will be returned.
-    pub async fn handshake(stream: S, export: &Export) -> crate::Result<Option<Self>> {
+    pub async fn handshake(stream: S, exports: &Exports) -> crate::Result<Option<Self>> {
         let mut conn = RawConnection::new(stream);
 
         // Send opening handshake, then negotiate options with client.
@@ -51,9 +51,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         let response: Vec<OptionResponse> = client_options
             .known
             .into_iter()
-            // TODO(mdlayher): is it necessary to clone the export for each
-            // response?
-            .map(|request| OptionResponse::from_request(request, export.clone()))
+            .map(|request| OptionResponse::from_request(request, exports))
             .collect();
 
         if response
@@ -225,20 +223,20 @@ mod tests {
         .await
         .expect("failed to connect");
 
-        let export = Arc::new(Export {
+        let exports = Arc::new(Exports::single(Export {
             name: "foo".to_string(),
             description: "bar".to_string(),
             size: 256 * MiB,
             block_size: 512,
             readonly: true,
-        });
+        }));
 
-        let server_export = export.clone();
+        let server_exports = exports.clone();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
             // TODO(mdlayher): make tests for data transmission phase later.
-            let conn = Connection::handshake(socket, &server_export)
+            let conn = Connection::handshake(socket, &server_exports)
                 .await
                 .expect("failed to perform server handshake");
 
@@ -248,7 +246,7 @@ mod tests {
             );
         });
 
-        let client_export = export.clone();
+        let client_exports = exports.clone();
         let client = tokio::spawn(async move {
             // TODO(mdlayher): replace with Client type.
             let mut conn = RawConnection::new(conn);
@@ -279,13 +277,15 @@ mod tests {
             );
 
             let server_options = read_frame!(conn, FrameType::ServerOptions, Frame::ServerOptions);
-            let got_export = match &server_options.known[0] {
-                OptionResponse::Info(info) => &info.export,
+            let export = match &server_options.known[0] {
+                OptionResponse::Info(GoResponse::Ok { export, .. }) => export.clone(),
                 _ => panic!("could not get export from Info response"),
             };
 
+            let got_exports = Exports::single(export);
+
             assert_eq!(
-                &*client_export, got_export,
+                *client_exports, got_exports,
                 "unexpected export received by client"
             );
 

@@ -11,7 +11,7 @@ mod consts;
 mod frame;
 
 pub use connection::Connection;
-pub use frame::Export;
+pub use frame::{Export, Exports};
 
 /// A generic Error produced by this crate.
 ///
