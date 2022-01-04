@@ -17,8 +17,8 @@ async fn main() {
 
     // TODO(mdlayher): allow multiple exports, lock export per client.
     let export = Arc::new(Export {
-        name: "mdlayher nbd-rs",
-        description: "An NBD server written in Rust",
+        name: "mdlayher nbd-rs".to_string(),
+        description: "An NBD server written in Rust".to_string(),
         size: 256 * MiB,
         block_size: 512,
         readonly: true,
@@ -34,7 +34,7 @@ async fn main() {
     }
 }
 
-async fn process(socket: TcpStream, addr: SocketAddr, export: &Export<'_>) {
+async fn process(socket: TcpStream, addr: SocketAddr, export: &Export) {
     let mut conn = match Connection::handshake(socket, export).await {
         Ok(conn) => match conn {
             Some(conn) => conn,
