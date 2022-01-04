@@ -14,7 +14,6 @@ use crate::consts::*;
 /// chunk up logical operations in this library.
 #[derive(Debug, PartialEq)]
 pub enum Frame {
-    ClientFlags(ClientFlags),
     ClientOptions(ClientOptions),
     ServerHandshake(HandshakeFlags),
     ServerOptions(ServerOptions),
@@ -27,7 +26,6 @@ pub enum Frame {
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub enum FrameType {
-    ClientFlags,
     ClientOptions,
     ServerHandshake,
     ServerOptions,
@@ -56,8 +54,9 @@ bitflags! {
 
 /// Options sent by the client which are parsed as either known or unknown
 /// depending on the server's capabilities.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct ClientOptions {
+    pub flags: ClientFlags,
     pub known: Vec<OptionRequest>,
     // Set only when parsing.
     pub unknown: Vec<u32>,
@@ -404,15 +403,9 @@ impl Frame {
     /// `FrameType` from `src`.
     pub fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
         match frame_type {
-            FrameType::ClientFlags => {
+            FrameType::ClientOptions => {
                 // flags u32
                 get_u32(src)?;
-                Ok(())
-            }
-            FrameType::ClientOptions => {
-                if src.remaining() == 0 {
-                    return Err(Error::Incomplete);
-                }
 
                 while src.has_remaining() {
                     next_client_option(src, frame_type)?;
@@ -461,13 +454,10 @@ impl Frame {
     /// Parses the next `Frame` according to the given `FrameType`.
     pub fn parse(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
         match frame_type {
-            FrameType::ClientFlags => {
+            FrameType::ClientOptions => {
                 let flags =
                     ClientFlags::from_bits(get_u32(src)?).ok_or(Error::Protocol(frame_type))?;
 
-                Ok(Frame::ClientFlags(flags))
-            }
-            FrameType::ClientOptions => {
                 let mut known = Vec::new();
                 let mut unknown = Vec::new();
                 while src.has_remaining() {
@@ -479,7 +469,11 @@ impl Frame {
                     }
                 }
 
-                Ok(Frame::ClientOptions(ClientOptions { known, unknown }))
+                Ok(Frame::ClientOptions(ClientOptions {
+                    flags,
+                    known,
+                    unknown,
+                }))
             }
             FrameType::ServerHandshake => {
                 if get_u64(src)? != NBDMAGIC {
@@ -538,7 +532,6 @@ impl Frame {
     /// bytes were written to the stream or `None` if not.
     pub async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<Option<()>> {
         match self {
-            Frame::ClientFlags(flags) => dst.write_u32(flags.bits()).await?,
             Frame::ClientOptions(options) => {
                 // When we write a Frame, it doesn't makes sense to provide
                 // options. These are only set when parsing a Frame.
@@ -549,13 +542,10 @@ impl Frame {
                     "unknown ClientOptions must be empty for write"
                 );
 
-                let options = &options.known;
-                if options.is_empty() {
-                    // Noop, nothing to write.
-                    return Ok(None);
-                }
+                dst.write_u32(options.flags.bits()).await?;
 
                 // Write each option's header and code.
+                let options = &options.known;
                 for option in options {
                     dst.write_u64(IHAVEOPT).await?;
                     dst.write_u32(option.code() as u32).await?;
@@ -660,7 +650,6 @@ impl Frame {
     /// Converts a Frame to its associated FrameType.
     fn to_type(&self) -> FrameType {
         match self {
-            Self::ClientFlags(..) => FrameType::ClientFlags,
             Self::ClientOptions(..) => FrameType::ClientOptions,
             Self::ServerHandshake(..) => FrameType::ServerHandshake,
             Self::ServerOptionsAbort | Self::ServerOptions(..) => FrameType::ServerOptions,
@@ -1125,20 +1114,10 @@ mod valid_tests {
     }
 
     frame_read_tests! {
-        client_flags_empty: Frame::ClientFlags: (
-            [0u8; 4], FrameType::ClientFlags, ClientFlags::empty(),
-        ),
-
-        client_flags_all: Frame::ClientFlags: (
-            [0, 0, 0, 1 | 2],
-            FrameType::ClientFlags,
-            ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
-        ),
-
         client_options_go_minimal: Frame::ClientOptions: (
             [
-                // ClientOptions
-                //
+                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1157,6 +1136,7 @@ mod valid_tests {
             ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
+                flags: ClientFlags::all(),
                 known: vec![OptionRequest::Go(GoRequest{
                     name: None,
                     info_requests: vec![InfoType::Export],
@@ -1166,6 +1146,8 @@ mod valid_tests {
         ),
         client_options_go_full: Frame::ClientOptions: (
             [
+                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1202,6 +1184,7 @@ mod valid_tests {
             ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
+                      flags: ClientFlags::all(),
                 known: vec![OptionRequest::Go(GoRequest{
                     name: Some("test".to_string()),
                     info_requests: vec![
@@ -1218,8 +1201,8 @@ mod valid_tests {
         // with Go.
         client_options_info_minimal: Frame::ClientOptions: (
             [
-                // ClientOptions
-                //
+                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1238,6 +1221,7 @@ mod valid_tests {
             ].concat(),
             FrameType::ClientOptions,
             ClientOptions{
+                      flags: ClientFlags::all(),
                 known: vec![OptionRequest::Info(GoRequest{
                     name: None,
                     info_requests: vec![InfoType::Export],
@@ -1571,16 +1555,15 @@ mod valid_tests {
     }
 
     frame_roundtrip_tests! {
-        client_flags_roundtrip: (
-            Frame::ClientFlags(ClientFlags::all()),
-            &[0, 0, 0, 1 | 2],
-        ),
         client_options_abort_roundtrip: (
             Frame::ClientOptions(ClientOptions{
+                flags: ClientFlags::all(),
                 known: vec![OptionRequest::Abort],
                 unknown: Vec::new(),
             }),
             [
+                                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1593,6 +1576,7 @@ mod valid_tests {
         ),
         client_options_go_roundtrip: (
             Frame::ClientOptions(ClientOptions{
+                flags: ClientFlags::all(),
                 known: vec![OptionRequest::Go(GoRequest{
                     name: Some("test".to_string()),
                     info_requests: vec![
@@ -1605,6 +1589,8 @@ mod valid_tests {
                 unknown: Vec::new(),
             }),
             [
+                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1635,6 +1621,7 @@ mod valid_tests {
         // with Go.
         client_options_info_roundtrip: (
             Frame::ClientOptions(ClientOptions{
+                flags: ClientFlags::all(),
                 known: vec![OptionRequest::Info(GoRequest{
                     name: None,
                     info_requests: vec![InfoType::Export],
@@ -1642,6 +1629,8 @@ mod valid_tests {
                 unknown: Vec::new(),
             }),
             [
+                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1663,10 +1652,13 @@ mod valid_tests {
         ),
         client_options_list_roundtrip: (
             Frame::ClientOptions(ClientOptions{
+                flags: ClientFlags::all(),
                 known: vec![OptionRequest::List],
                 unknown: Vec::new(),
             }),
             [
+                // Flags
+                &[0, 0, 0, 1 | 2],
                 // Magic
                 IHAVEOPT_BUF,
                 &[
@@ -1943,7 +1935,6 @@ mod valid_tests {
     }
 
     frame_write_none_tests! {
-        client_options_none: Frame::ClientOptions(ClientOptions{known: Vec::new(), unknown: Vec::new()}),
         server_options_none: Frame::ServerOptions(ServerOptions{known: Vec::new(), unknown: Vec::new()}),
         server_unsupported_options_none: Frame::ServerUnsupportedOptions(Vec::new()),
     }
@@ -1970,7 +1961,6 @@ mod invalid_tests {
     }
 
     frame_incomplete_tests! {
-        client_flags_short: (FrameType::ClientFlags, [0u8; 3]),
         client_options_short: (FrameType::ClientOptions, b"IHAVEOP"),
     }
 
@@ -1991,7 +1981,6 @@ mod invalid_tests {
     }
 
     frame_protocol_error_tests! {
-        client_flags_all: (FrameType::ClientFlags, [0xff, 0xff, 0xff, 0xff]),
         client_options_magic: (FrameType::ClientOptions, b"deadbeef"),
         client_options_go_utf8: (
             FrameType::ClientOptions,

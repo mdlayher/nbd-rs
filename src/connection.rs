@@ -19,85 +19,73 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     pub async fn handshake(stream: S, export: &Export) -> crate::Result<Option<Self>> {
         let mut conn = RawConnection::new(stream);
 
-        // Send opening handshake, verify client flags.
-        {
-            conn.write_frame(Frame::ServerHandshake(
-                HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES,
-            ))
-            .await?;
-
-            let client_flags = match conn
-                .read_frame(FrameType::ClientFlags)
-                .await?
-                .ok_or("client terminated while sending client flags")?
-            {
-                Frame::ClientFlags(flags) => flags,
-                _ => return Err("client sent invalid client flags frame".into()),
-            };
-
-            dbg!(&client_flags);
-
-            // We expect the client to match our hard-coded flags.
-            if !client_flags.contains(ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES) {
-                return Err("client cannot negotiate fixed newstyle and no zeroes flags".into());
-            }
-        }
+        // Send opening handshake, then negotiate options with client.
+        conn.write_frame(Frame::ServerHandshake(
+            HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES,
+        ))
+        .await?;
 
         // Negotiate options with client.
+        let client_options = match conn
+            .read_frame(FrameType::ClientOptions)
+            .await?
+            .ok_or("client terminated while sending client options")?
         {
-            let client_options = match conn
-                .read_frame(FrameType::ClientOptions)
-                .await?
-                .ok_or("client terminated while sending client options")?
-            {
-                Frame::ClientOptions(options) => options,
-                _ => return Err("client sent invalid client options frame".into()),
-            };
+            Frame::ClientOptions(options) => options,
+            _ => return Err("client sent invalid client options frame".into()),
+        };
 
-            dbg!(&client_options);
+        dbg!(&client_options);
 
-            // For every client known request option, generate the appropriate
-            // response. Many of these responses will return information about
-            // the current export.
-            let response: Vec<OptionResponse> = client_options
-                .known
-                .into_iter()
-                // TODO(mdlayher): is it necessary to clone the export for each
-                // response?
-                .map(|request| OptionResponse::from_request(request, export.clone()))
-                .collect();
+        // We expect the client to match our hard-coded flags.
+        if !client_options
+            .flags
+            .contains(ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES)
+        {
+            return Err("client cannot negotiate fixed newstyle and no zeroes flags".into());
+        }
 
-            if response
-                .iter()
-                .any(|option| matches!(option, OptionResponse::Abort))
-            {
-                // Short-circuit; an abort means the server should abort
-                // immediately and ignore any other client data, even if the
-                // request might contain invalid options we would otherwise
-                // reject.
-                conn.write_frame(Frame::ServerOptionsAbort).await?;
-                return Ok(None);
-            }
+        // For every client known request option, generate the appropriate
+        // response. Many of these responses will return information about
+        // the current export.
+        let response: Vec<OptionResponse> = client_options
+            .known
+            .into_iter()
+            // TODO(mdlayher): is it necessary to clone the export for each
+            // response?
+            .map(|request| OptionResponse::from_request(request, export.clone()))
+            .collect();
 
-            // May send nothing if the client didn't pass any unknown options.
-            conn.write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
-                .await?;
+        if response
+            .iter()
+            .any(|option| matches!(option, OptionResponse::Abort))
+        {
+            // Short-circuit; an abort means the server should abort
+            // immediately and ignore any other client data, even if the
+            // request might contain invalid options we would otherwise
+            // reject.
+            conn.write_frame(Frame::ServerOptionsAbort).await?;
+            return Ok(None);
+        }
 
-            let do_transmit = response.iter().any(OptionResponse::do_transmit);
+        // May send nothing if the client didn't pass any unknown options.
+        conn.write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
+            .await?;
 
-            dbg!(&response);
+        let do_transmit = response.iter().any(OptionResponse::do_transmit);
 
-            // Respond to known options.
-            conn.write_frame(ServerOptions::from_server(response))
-                .await?;
+        dbg!(&response);
 
-            if do_transmit {
-                // Handshake complete, ready for transmission.
-                Ok(Some(Self { conn }))
-            } else {
-                // No transmission needed, terminate the connection.
-                Ok(None)
-            }
+        // Respond to known options.
+        conn.write_frame(ServerOptions::from_server(response))
+            .await?;
+
+        if do_transmit {
+            // Handshake complete, ready for transmission.
+            Ok(Some(Self { conn }))
+        } else {
+            // No transmission needed, terminate the connection.
+            Ok(None)
         }
     }
 
@@ -275,12 +263,8 @@ mod tests {
 
             write_frame!(
                 conn,
-                Frame::ClientFlags(ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES)
-            );
-
-            write_frame!(
-                conn,
                 Frame::ClientOptions(ClientOptions {
+                    flags: ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
                     known: vec![OptionRequest::Info(GoRequest {
                         name: None,
                         info_requests: vec![
