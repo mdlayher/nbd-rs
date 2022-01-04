@@ -410,6 +410,10 @@ impl Frame {
                 Ok(())
             }
             FrameType::ClientOptions => {
+                if src.remaining() == 0 {
+                    return Err(Error::Incomplete);
+                }
+
                 while src.has_remaining() {
                     next_client_option(src, frame_type)?;
                 }
@@ -424,6 +428,10 @@ impl Frame {
                 Ok(())
             }
             FrameType::ServerOptions => {
+                if src.remaining() == 0 {
+                    return Err(Error::Incomplete);
+                }
+
                 while src.has_remaining() {
                     next_server_option(src, frame_type)?;
                 }
@@ -431,6 +439,10 @@ impl Frame {
                 Ok(())
             }
             FrameType::ServerUnsupportedOptions => {
+                if src.remaining() == 0 {
+                    return Err(Error::Incomplete);
+                }
+
                 while src.has_remaining() {
                     // REPLYMAGIC u64, option u32 + unsupported error u32
                     get_u64(src)?;

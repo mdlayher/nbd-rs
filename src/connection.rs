@@ -85,6 +85,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
             let do_transmit = response.iter().any(OptionResponse::do_transmit);
 
+            dbg!(&response);
+
             // Respond to known options.
             conn.write_frame(ServerOptions::from_server(response))
                 .await?;
@@ -193,17 +195,41 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 mod tests {
     use super::*;
     use crate::consts::*;
+    use std::sync::Arc;
     use tokio::net;
 
+    macro_rules! read_frame {
+        ($conn:expr, $frame_type:expr, $type:path) => {
+            match $conn
+                .read_frame($frame_type)
+                .await
+                .expect("failed to read frame")
+                .expect("received None frame")
+            {
+                $type(v) => v,
+                _ => panic!("failed to match frame value"),
+            }
+        };
+    }
+
+    macro_rules! write_frame {
+        ($conn:expr, $frame:expr) => {
+            $conn
+                .write_frame($frame)
+                .await
+                .expect("failed to write frame");
+        };
+    }
+
     #[tokio::test]
-    async fn handshake() {
+    async fn handshake_info() {
         // Start a locally bound TCP listener and connect to it via another
         // socket so we can perform client/server testing.
         let listener = net::TcpListener::bind("localhost:0")
             .await
             .expect("failed to listen");
 
-        let mut stream = net::TcpStream::connect(
+        let conn = net::TcpStream::connect(
             listener
                 .local_addr()
                 .expect("failed to get listener address"),
@@ -211,19 +237,20 @@ mod tests {
         .await
         .expect("failed to connect");
 
-        let server = tokio::spawn(async move {
-            let export = Export {
-                name: "foo".to_string(),
-                description: "bar".to_string(),
-                size: 256 * MiB,
-                block_size: 512,
-                readonly: true,
-            };
+        let export = Arc::new(Export {
+            name: "foo".to_string(),
+            description: "bar".to_string(),
+            size: 256 * MiB,
+            block_size: 512,
+            readonly: true,
+        });
 
+        let server_export = export.clone();
+        let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
             // TODO(mdlayher): make tests for data transmission phase later.
-            let conn = Connection::handshake(socket, &export)
+            let conn = Connection::handshake(socket, &server_export)
                 .await
                 .expect("failed to perform server handshake");
 
@@ -233,57 +260,57 @@ mod tests {
             );
         });
 
+        let client_export = export.clone();
         let client = tokio::spawn(async move {
-            // We don't have a Client type so these read/write interactions and
-            // bytes are handled manually for now.
-            //
-            // TODO(mdlayher): replace with Client type and proper Frame support.
+            // TODO(mdlayher): replace with Client type.
+            let mut conn = RawConnection::new(conn);
 
-            // Drain server handshake.
-            let mut buf = BytesMut::with_capacity(8 * 1024);
-            let n = stream
-                .read_buf(&mut buf)
-                .await
-                .expect("failed to drain server handshake");
+            let server_flags =
+                read_frame!(conn, FrameType::ServerHandshake, Frame::ServerHandshake);
 
-            // Check the presence of server magic.
-            assert_eq!(
-                &buf[..8],
-                NBDMAGIC_BUF,
-                "unexpected server handshake magic value"
+            assert!(
+                server_flags.contains(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
+                "invalid server flags"
             );
-            buf.advance(n);
 
-            // Send client flags.
-            stream
-                .write_u32((ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES).bits())
-                .await
-                .expect("failed to send client flags");
+            write_frame!(
+                conn,
+                Frame::ClientFlags(ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES)
+            );
 
-            // Send client options. Notably this sends an unknown option 0 with
-            // length 0 for the time being; we don't care about sending a known
-            // option.
-            stream
-                .write_all(&[IHAVEOPT_BUF, &[0u8; 8]].concat())
-                .await
-                .expect("failed to send client options");
+            write_frame!(
+                conn,
+                Frame::ClientOptions(ClientOptions {
+                    known: vec![OptionRequest::Info(GoRequest {
+                        name: None,
+                        info_requests: vec![
+                            InfoType::Export,
+                            InfoType::Name,
+                            InfoType::Description,
+                            InfoType::BlockSize
+                        ]
+                    })],
+                    unknown: vec![]
+                })
+            );
 
-            stream.flush().await.expect("failed to flush stream");
+            let server_options = read_frame!(conn, FrameType::ServerOptions, Frame::ServerOptions);
+            let got_export = match &server_options.known[0] {
+                OptionResponse::Info(info) => &info.export,
+                _ => panic!("could not get export from Info response"),
+            };
 
-            // Read server options.
-            stream
-                .read_buf(&mut buf)
-                .await
-                .expect("failed to read server options");
-
-            // Since we don't support full frame parsing for frames that are
-            // sent to clients, just assert for the server's reply magic value
-            // which indicates it accepted our handshake and sent some kind of
-            // options data back to us.
             assert_eq!(
-                &buf[..8],
-                REPLYMAGIC_BUF,
-                "unexpected server reply magic value"
+                &*client_export, got_export,
+                "unexpected export received by client"
+            );
+
+            assert!(
+                conn.read_frame(FrameType::ServerHandshake)
+                    .await
+                    .expect("failed to perform final read")
+                    .is_none(),
+                "server should have closed the connection"
             );
         });
 
