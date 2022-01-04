@@ -16,13 +16,31 @@ async fn main() {
         .expect("failed to listen");
 
     // TODO(mdlayher): allow multiple exports, lock export per client.
-    let exports = Arc::new(Exports::single(Export {
-        name: "mdlayher nbd-rs".to_string(),
-        description: "An NBD server written in Rust".to_string(),
-        size: 256 * MiB,
-        block_size: 512,
-        readonly: true,
-    }));
+    let exports = Arc::new(Exports::multiple(
+        Export {
+            name: "mdlayher nbd-rs".to_string(),
+            description: "An NBD server written in Rust".to_string(),
+            size: 256 * MiB,
+            block_size: 512,
+            readonly: true,
+        },
+        vec![
+            Export {
+                name: "big".to_string(),
+                description: "A large export".to_string(),
+                size: 1024 * MiB,
+                block_size: 4096,
+                readonly: true,
+            },
+            Export {
+                name: "small".to_string(),
+                description: "A small export".to_string(),
+                size: 1 * MiB,
+                block_size: 512,
+                readonly: true,
+            },
+        ],
+    ));
 
     loop {
         let (socket, addr) = listener.accept().await.expect("failed to accept");
