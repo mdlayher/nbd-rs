@@ -1,6 +1,9 @@
 use bytes::{Buf, BytesMut};
 use std::io::{self, Cursor};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
+    net::{TcpStream, ToSocketAddrs},
+};
 
 use crate::frame::{self, *};
 
@@ -11,8 +14,18 @@ pub struct Client<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
-    /// Initiates the NBD client handshake with a server to produce a `Client`
-    /// which can then query metadata or perform I/O transmission operations.
+    /// Establishes a TCP connection with the NBD server at `addr` and
+    /// immediately performs the client handshake operation. The resulting
+    /// `Client` can then be used to query metadata or perform I/O transmission
+    /// operations.
+    pub async fn connect<T: ToSocketAddrs>(addr: T) -> crate::Result<Client<TcpStream>> {
+        Client::handshake(TcpStream::connect(addr).await?).await
+    }
+
+    /// Initiates the NBD client handshake with a server using `stream`
+    /// (typically a TCP connection, but this is not required) to produce a
+    /// `Client` which can then query metadata or perform I/O transmission
+    /// operations.
     pub async fn handshake(stream: S) -> crate::Result<Self> {
         let mut conn = RawConnection::new(stream);
 
@@ -297,14 +310,10 @@ mod tests {
             .await
             .expect("failed to listen");
 
-        let client = Client::handshake(
-            net::TcpStream::connect(
-                listener
-                    .local_addr()
-                    .expect("failed to get listener address"),
-            )
-            .await
-            .expect("failed to connect"),
+        let client = Client::<TcpStream>::connect(
+            listener
+                .local_addr()
+                .expect("failed to get listener address"),
         );
 
         let exports = Arc::new(Exports::single(Export {
