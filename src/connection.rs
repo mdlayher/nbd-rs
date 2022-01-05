@@ -53,10 +53,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
     pub async fn info(&mut self, name: Option<&str>) -> crate::Result<Option<Export>> {
         // TODO(mdlayher): this feels awkward to get a String back from &str but
         // the mini-redis example does roughly the same.
-        let name = match name {
-            Some(string) => Some(string.to_string()),
-            None => None,
-        };
+        let name = name.map(|string| string.to_string());
 
         let options = self
             .options(OptionRequest::Info(GoRequest {
@@ -352,7 +349,8 @@ mod tests {
             let export = client
                 .info(None)
                 .await
-                .expect("failed to fetch default export");
+                .expect("failed to fetch default export")
+                .expect("no default export was found");
             let got_exports = Exports::single(export);
 
             assert_eq!(
