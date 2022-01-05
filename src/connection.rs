@@ -48,10 +48,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
     }
 
     /// Performs an Info request to fetch `Export` metadata from the server. If
-    /// name is `None`, the server's default export is fetched.
-    //
-    // TODO(mdlayher): name should be Option<&str>, work on this.
-    pub async fn info(&mut self, name: Option<String>) -> crate::Result<Export> {
+    /// `name` is `None`, the server's default export is fetched. If no export
+    /// matching `name` could be found, `None` is returned.
+    pub async fn info(&mut self, name: Option<&str>) -> crate::Result<Option<Export>> {
+        // TODO(mdlayher): this feels awkward to get a String back from &str but
+        // the mini-redis example does roughly the same.
+        let name = match name {
+            Some(string) => Some(string.to_string()),
+            None => None,
+        };
+
         let options = self
             .options(OptionRequest::Info(GoRequest {
                 name,
@@ -65,7 +71,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
             .await?;
 
         match &options[..] {
-            [OptionResponse::Info(GoResponse::Ok { export, .. })] => Ok(export.clone()),
+            [OptionResponse::Info(GoResponse::Ok { export, .. })] => Ok(Some(export.clone())),
+            // TODO(mdlayher): display error strings? Add Error::NotFound?
+            [OptionResponse::Info(GoResponse::Unknown(_))] => Ok(None),
             _ => Err("server did not send an info response server option".into()),
         }
     }
