@@ -1,9 +1,8 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
 extern crate nbd_rs;
-use nbd_rs::{Connection, Export, Exports};
+use nbd_rs::{Export, Exports, Result, ServerConnection};
 
 /// A symbolic constant for 1 MiB.
 #[allow(non_upper_case_globals)]
@@ -15,7 +14,6 @@ async fn main() {
         .await
         .expect("failed to listen");
 
-    // TODO(mdlayher): allow multiple exports, lock export per client.
     let exports = Arc::new(Exports::multiple(
         Export {
             name: "mdlayher nbd-rs".to_string(),
@@ -47,28 +45,22 @@ async fn main() {
 
         let exports = exports.clone();
         tokio::spawn(async move {
-            process(socket, addr, &exports).await;
+            let mut conn = ServerConnection::new(socket);
+            if let Err(err) = process(&mut conn, &exports).await {
+                println!("{:?}: error: {}", addr, err);
+            }
         });
     }
 }
 
-async fn process(socket: TcpStream, addr: SocketAddr, exports: &Exports) {
-    let mut conn = match Connection::handshake(socket, exports).await {
-        Ok(conn) => match conn {
-            Some(conn) => conn,
-            None => {
-                println!("{:?}: sent metadata, skipping transmission", addr);
-                return;
-            }
-        },
-        Err(err) => {
-            println!("{:?}: handshake error: {}", addr, err);
-            return;
-        }
-    };
-
-    println!("{:?}: starting data transmission", addr);
-    if let Err(err) = conn.transmit().await {
-        println!("{:?}: transmit error: {}", addr, err);
+async fn process(conn: &mut ServerConnection<TcpStream>, exports: &Exports) -> Result<()> {
+    // Perform the initial handshake. The client and server may negotiate back
+    // and forth several times.
+    if let None = conn.handshake(exports).await? {
+        // Client didn't wish to initiate data transmission, do nothing.
+        return Ok(());
     }
+
+    // Client is ready to transmit data.
+    conn.transmit().await
 }

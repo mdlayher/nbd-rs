@@ -1,7 +1,5 @@
-//! An asynchronous Rust implementation of the [Network Block Device
-//! (NBD)](https://en.wikipedia.org/wiki/Network_block_device) protocol.
-//!
-//! Only server connection functionality is available at the moment.
+//! An asynchronous Rust client and server implementation of the [Network Block
+//! Device (NBD)](https://en.wikipedia.org/wiki/Network_block_device) protocol.
 
 extern crate bitflags;
 extern crate num_derive;
@@ -10,7 +8,7 @@ mod connection;
 mod consts;
 mod frame;
 
-pub use connection::Connection;
+pub use connection::{Client, ServerConnection};
 pub use frame::{Export, Exports};
 
 /// A generic Error produced by this crate.

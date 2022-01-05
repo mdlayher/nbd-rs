@@ -4,88 +4,193 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
 use crate::frame::{self, *};
 
-/// A high-level Network Block Device (NBD) server connection.
-pub struct Connection<S> {
+/// An NBD client connection which can query information and perform I/O
+/// transmission operations with a server export.
+pub struct Client<S> {
     conn: RawConnection<S>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
-    /// Initiates the NBD server handshake with `stream` (typically a client TCP
-    /// connection) and exposes metadata from `export`, creating a `Connection`
-    /// which is ready to transmit data.
+impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+    /// Initiates the NBD client handshake with a server to produce a `Client`
+    /// which can then query metadata or perform I/O transmission operations.
+    pub async fn handshake(stream: S) -> crate::Result<Self> {
+        let mut conn = RawConnection::new(stream);
+
+        // Expect the client and server to support the fixed newstyle handshake
+        // with no zeroes flag enabled.
+        let server_flags = match conn
+            .read_frame(FrameType::ServerHandshake)
+            .await?
+            .ok_or("server terminated connection while reading server handshake")?
+        {
+            Frame::ServerHandshake(flags) => flags,
+            _ => return Err("server sent invalid server handshake".into()),
+        };
+
+        if !server_flags.contains(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES) {
+            return Err("cannot negotiate fixed newstyle handshake with server".into());
+        }
+
+        Ok(Self { conn })
+    }
+
+    /// Performs an Info request to fetch `Export` metadata from the server. If
+    /// name is `None`, the server's default export is fetched.
+    //
+    // TODO(mdlayher): name should be Option<&str>, work on this.
+    pub async fn info(&mut self, name: Option<String>) -> crate::Result<Export> {
+        let options = self
+            .options(OptionRequest::Info(GoRequest {
+                name,
+                info_requests: vec![
+                    InfoType::Export,
+                    InfoType::Name,
+                    InfoType::Description,
+                    InfoType::BlockSize,
+                ],
+            }))
+            .await?;
+
+        match &options[..] {
+            [OptionResponse::Info(GoResponse::Ok { export, .. })] => Ok(export.clone()),
+            _ => Err("server did not send an info response server option".into()),
+        }
+    }
+
+    /// Sends a raw `OptionRequest` for a known option and returns one or more
+    /// raw `OptionResponse` values.
+    async fn options(&mut self, option: OptionRequest) -> crate::Result<Vec<OptionResponse>> {
+        self.conn
+            .write_frame(Frame::ClientOptions(ClientOptions {
+                flags: ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
+                known: vec![option],
+                unknown: Vec::new(),
+            }))
+            .await?;
+
+        let server_options = match self
+            .conn
+            .read_frame(FrameType::ServerOptions)
+            .await?
+            .ok_or("server terminated connection while reading server options")?
+        {
+            Frame::ServerOptions(options) => options,
+            _ => return Err("server sent invalid server options".into()),
+        };
+
+        if !server_options.unknown.is_empty() {
+            return Err(format!(
+                "server did not recognize options: {:?}",
+                server_options.unknown,
+            )
+            .into());
+        }
+
+        Ok(server_options.known)
+    }
+}
+
+// TODO(mdlayher): Server type to listen and produce ServerConnections.
+
+/// An NBD server connection which can perform I/O transmission operations with
+/// a client.
+pub struct ServerConnection<S> {
+    conn: RawConnection<S>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
+    /// Creates an NBD server connection wrapping `stream` (typically an
+    /// accepted client TCP connection) and allocates memory to begin serving
+    /// the client's requests.
+    pub fn new(stream: S) -> Self {
+        Self {
+            conn: RawConnection::new(stream),
+        }
+    }
+
+    /// Initiates the NBD server handshake with a client by exposing the
+    /// metadata from `exports`. It is possible for a client to query the server
+    /// for options multiple times before initiating data transmission.
     ///
     /// If the client wishes to read data from the server without initiating the
     /// data transmission phase, `Ok(None)` will be returned.
-    pub async fn handshake(stream: S, exports: &Exports) -> crate::Result<Option<Self>> {
-        let mut conn = RawConnection::new(stream);
-
+    pub async fn handshake(&mut self, exports: &Exports) -> crate::Result<Option<()>> {
         // Send opening handshake, then negotiate options with client.
-        conn.write_frame(Frame::ServerHandshake(
-            HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES,
-        ))
-        .await?;
-
-        // Negotiate options with client.
-        let client_options = match conn
-            .read_frame(FrameType::ClientOptions)
-            .await?
-            .ok_or("client terminated while sending client options")?
-        {
-            Frame::ClientOptions(options) => options,
-            _ => return Err("client sent invalid client options frame".into()),
-        };
-
-        dbg!(&client_options);
-
-        // We expect the client to match our hard-coded flags.
-        if !client_options
-            .flags
-            .contains(ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES)
-        {
-            return Err("client cannot negotiate fixed newstyle and no zeroes flags".into());
-        }
-
-        // For every client known request option, generate the appropriate
-        // response. Many of these responses will return information about
-        // the current export.
-        let response: Vec<OptionResponse> = client_options
-            .known
-            .into_iter()
-            .map(|request| OptionResponse::from_request(request, exports))
-            .collect();
-
-        if response
-            .iter()
-            .any(|option| matches!(option, OptionResponse::Abort))
-        {
-            // Short-circuit; an abort means the server should abort
-            // immediately and ignore any other client data, even if the
-            // request might contain invalid options we would otherwise
-            // reject.
-            conn.write_frame(Frame::ServerOptionsAbort).await?;
-            return Ok(None);
-        }
-
-        // May send nothing if the client didn't pass any unknown options.
-        conn.write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
+        self.conn
+            .write_frame(Frame::ServerHandshake(
+                HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES,
+            ))
             .await?;
 
-        let do_transmit = response.iter().any(OptionResponse::do_transmit);
+        loop {
+            // Negotiate options with client.
+            let client_options = match self.conn.read_frame(FrameType::ClientOptions).await {
+                Ok(frame) => match frame {
+                    Some(frame) => match frame {
+                        Frame::ClientOptions(options) => options,
+                        _ => return Err("client sent invalid client options frame".into()),
+                    },
+                    // No frame, client hung up.
+                    None => return Ok(None),
+                },
+                // Client hung up, don't care.
+                Err(_) => return Ok(None),
+            };
 
-        dbg!(&response);
+            dbg!(&client_options);
 
-        // Respond to known options.
-        conn.write_frame(ServerOptions::from_server(response))
-            .await?;
+            // We expect the client to match our hard-coded flags.
+            if !client_options
+                .flags
+                .contains(ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES)
+            {
+                return Err("client cannot negotiate fixed newstyle and no zeroes flags".into());
+            }
 
-        if do_transmit {
-            // Handshake complete, ready for transmission.
-            Ok(Some(Self { conn }))
-        } else {
-            // No transmission needed, terminate the connection.
-            Ok(None)
+            // For every client known request option, generate the appropriate
+            // response. Many of these responses will return information about
+            // the current export.
+            let response: Vec<OptionResponse> = client_options
+                .known
+                .into_iter()
+                .map(|request| OptionResponse::from_request(request, exports))
+                .collect();
+
+            if response
+                .iter()
+                .any(|option| matches!(option, OptionResponse::Abort))
+            {
+                // Short-circuit; an abort means the server should abort
+                // immediately and ignore any other client data, even if the
+                // request might contain invalid options we would otherwise
+                // reject.
+                self.conn.write_frame(Frame::ServerOptionsAbort).await?;
+                return Ok(None);
+            }
+
+            // May send nothing if the client didn't pass any unknown options.
+            self.conn
+                .write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
+                .await?;
+
+            let do_transmit = response.iter().any(OptionResponse::do_transmit);
+
+            dbg!(&response);
+
+            // Respond to known options.
+            self.conn
+                .write_frame(ServerOptions::from_server(response))
+                .await?;
+
+            if do_transmit {
+                // Handshake complete, ready for transmission.
+                return Ok(Some(()));
+            }
         }
     }
+
+    // TODO(mdlayher): probably make a TransmitConnection type so it's harder to
+    // misuse the API by transmitting before handshake.
 
     /// Begins the data transmission phase of the NBD protocol with a client
     /// which previously completed the NBD handshake.
@@ -184,44 +289,23 @@ mod tests {
     use std::sync::Arc;
     use tokio::net;
 
-    macro_rules! read_frame {
-        ($conn:expr, $frame_type:expr, $type:path) => {
-            match $conn
-                .read_frame($frame_type)
-                .await
-                .expect("failed to read frame")
-                .expect("received None frame")
-            {
-                $type(v) => v,
-                _ => panic!("failed to match frame value"),
-            }
-        };
-    }
-
-    macro_rules! write_frame {
-        ($conn:expr, $frame:expr) => {
-            $conn
-                .write_frame($frame)
-                .await
-                .expect("failed to write frame");
-        };
-    }
-
     #[tokio::test]
-    async fn handshake_info() {
+    async fn info() {
         // Start a locally bound TCP listener and connect to it via another
         // socket so we can perform client/server testing.
         let listener = net::TcpListener::bind("localhost:0")
             .await
             .expect("failed to listen");
 
-        let conn = net::TcpStream::connect(
-            listener
-                .local_addr()
-                .expect("failed to get listener address"),
-        )
-        .await
-        .expect("failed to connect");
+        let client = Client::handshake(
+            net::TcpStream::connect(
+                listener
+                    .local_addr()
+                    .expect("failed to get listener address"),
+            )
+            .await
+            .expect("failed to connect"),
+        );
 
         let exports = Arc::new(Exports::single(Export {
             name: "foo".to_string(),
@@ -232,73 +316,35 @@ mod tests {
         }));
 
         let server_exports = exports.clone();
-        let server = tokio::spawn(async move {
+        let server_handle = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
             // TODO(mdlayher): make tests for data transmission phase later.
-            let conn = Connection::handshake(socket, &server_exports)
+            let mut conn = ServerConnection::new(socket);
+            conn.handshake(&server_exports)
                 .await
-                .expect("failed to perform server handshake");
-
-            assert!(
-                conn.is_none(),
-                "handshake should not have negotiated data transmission"
-            );
+                .expect("failed to perform server handshake")
+                .ok_or(())
+                .expect_err("handshake should not have negotiated data transmission");
         });
 
         let client_exports = exports.clone();
-        let client = tokio::spawn(async move {
-            // TODO(mdlayher): replace with Client type.
-            let mut conn = RawConnection::new(conn);
+        let client_handle = tokio::spawn(async move {
+            let mut client = client.await.expect("failed to complete client handshake");
 
-            let server_flags =
-                read_frame!(conn, FrameType::ServerHandshake, Frame::ServerHandshake);
-
-            assert!(
-                server_flags.contains(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES),
-                "invalid server flags"
-            );
-
-            write_frame!(
-                conn,
-                Frame::ClientOptions(ClientOptions {
-                    flags: ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
-                    known: vec![OptionRequest::Info(GoRequest {
-                        name: None,
-                        info_requests: vec![
-                            InfoType::Export,
-                            InfoType::Name,
-                            InfoType::Description,
-                            InfoType::BlockSize
-                        ]
-                    })],
-                    unknown: vec![]
-                })
-            );
-
-            let server_options = read_frame!(conn, FrameType::ServerOptions, Frame::ServerOptions);
-            let export = match &server_options.known[0] {
-                OptionResponse::Info(GoResponse::Ok { export, .. }) => export.clone(),
-                _ => panic!("could not get export from Info response"),
-            };
-
+            let export = client
+                .info(None)
+                .await
+                .expect("failed to fetch default export");
             let got_exports = Exports::single(export);
 
             assert_eq!(
                 *client_exports, got_exports,
                 "unexpected export received by client"
             );
-
-            assert!(
-                conn.read_frame(FrameType::ServerHandshake)
-                    .await
-                    .expect("failed to perform final read")
-                    .is_none(),
-                "server should have closed the connection"
-            );
         });
 
-        client.await.expect("failed to run client");
-        server.await.expect("failed to run server");
+        client_handle.await.expect("failed to run client");
+        server_handle.await.expect("failed to run server");
     }
 }
