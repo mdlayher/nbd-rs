@@ -35,7 +35,7 @@ async fn main() {
             Export {
                 name: "small".to_string(),
                 description: "A small export".to_string(),
-                size: 1 * MiB,
+                size: MiB,
                 block_size: 512,
                 readonly: true,
             },
