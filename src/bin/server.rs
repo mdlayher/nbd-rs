@@ -56,7 +56,7 @@ async fn main() {
 async fn process(conn: &mut ServerConnection<TcpStream>, exports: &Exports) -> Result<()> {
     // Perform the initial handshake. The client and server may negotiate back
     // and forth several times.
-    if let None = conn.handshake(exports).await? {
+    if conn.handshake(exports).await?.is_none() {
         // Client didn't wish to initiate data transmission, do nothing.
         return Ok(());
     }
