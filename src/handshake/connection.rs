@@ -357,14 +357,14 @@ mod tests {
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
             // TODO(mdlayher): make tests for data transmission phase later.
-            match ServerConnection::new(socket)
+            if ServerConnection::new(socket)
                 .handshake(&server_exports)
                 .await
                 .expect("failed to perform server handshake")
+                .is_some()
             {
-                Some(_) => panic!("server should not have negotiated data transmission"),
-                None => {}
-            };
+                panic!("server should not have negotiated data transmission")
+            }
         });
 
         let client_exports = exports.clone();
