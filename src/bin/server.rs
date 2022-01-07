@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 extern crate nbd_rs;
 use nbd_rs::{Export, Exports, Result, ServerConnection};
 
-/// A symbolic constant for 1 MiB.
+/// A symbolic constant for 1 GiB.
 #[allow(non_upper_case_globals)]
-const MiB: u64 = 1 << 20;
+const GiB: u64 = 1 << 30;
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +20,7 @@ async fn main() {
     let exports = Arc::new(Exports::single(Export {
         name: "mdlayher nbd-rs".to_string(),
         description: "An NBD server written in Rust".to_string(),
-        size: 256 * MiB,
+        size: 4 * GiB,
         block_size: 4096,
         readonly: true,
     }));
