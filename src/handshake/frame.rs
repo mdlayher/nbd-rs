@@ -19,8 +19,8 @@ pub struct Export {
     pub readonly: bool,
 }
 
-/// The `Export(s)` which can be served by a server. Use `Exports::single` to
-/// construct a default export, or `Exports::multiple` to construct a default
+/// One or more [`Export`]s which can be served by a server. Use [`Exports::single`] to
+/// construct a default export, or [`Exports::multiple`] to construct a default
 /// export with additional exports which can be accessed by name.
 #[derive(Debug, PartialEq)]
 pub struct Exports {

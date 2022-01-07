@@ -140,8 +140,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
 }
 
 /// An NBD server connection which is ready to perform data transmission.
-/// Calling the `transmit` method will consume the connection and block until
-/// the NBD client disconnects.
+/// This type is constructed by using the [`ServerConnection`]'s `handshake`
+/// method.
 pub struct ServerIoConnection<S> {
     stream: BufWriter<S>,
     buffer: BytesMut,
