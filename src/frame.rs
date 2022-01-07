@@ -4,7 +4,7 @@ use std::io::{self, Cursor, Read};
 use std::result;
 
 use crate::handshake::frame::FrameType as HandshakeFrameType;
-use crate::transmit::frame::FrameType as TransmitFrameType;
+use crate::transmit::FrameType as TransmitFrameType;
 
 /// Contains error information encountered while dealing with Frames.
 #[derive(Debug)]
@@ -13,7 +13,10 @@ pub enum Error {
     /// an entire Frame.
     Incomplete,
 
+    /// An error during the NBD protocol handshake.
     HandshakeProtocol(HandshakeFrameType),
+
+    /// An error during NBD protocol data transmission.
     TransmitProtocol(TransmitFrameType),
 
     Other(crate::Error),

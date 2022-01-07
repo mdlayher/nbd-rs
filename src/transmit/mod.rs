@@ -1,5 +1,8 @@
 //! Modules related to the data transmission phase of the Network Block Device
 //! (NBD) protocol.
 
-pub mod connection;
-pub mod frame;
+mod connection;
+pub(crate) use connection::RawIoConnection;
+
+mod frame;
+pub(crate) use frame::FrameType;

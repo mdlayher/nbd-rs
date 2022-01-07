@@ -2,9 +2,9 @@ use bytes::BytesMut;
 use std::io::{Read, Seek, Write};
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
 
-use crate::handshake::connection::RawConnection;
 use crate::handshake::frame::*;
-use crate::transmit::connection::RawIoConnection;
+use crate::handshake::RawConnection;
+use crate::transmit::RawIoConnection;
 
 // TODO(mdlayher): Server type to listen and produce ServerConnections.
 

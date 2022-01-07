@@ -1,5 +1,7 @@
 //! Modules related to the handshake phase of the Network Block Device (NBD)
 //! protocol.
 
-pub mod connection;
-pub mod frame;
+mod connection;
+pub(crate) use connection::RawConnection;
+
+pub(crate) mod frame;

@@ -9,19 +9,59 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use crate::consts::*;
 use crate::frame::*;
 
-/// An NBD handshake data frame sent between client and server. Note that the
-/// frame types here do not necessarily correspond to the NBD specification, but
-/// are used to chunk up logical operations in this library.
-#[derive(Debug, PartialEq)]
-pub enum Frame {
-    ClientOptions(ClientOptions),
-    ServerHandshake(HandshakeFlags),
-    ServerOptions(ServerOptions),
-    ServerOptionsAbort,
-    ServerUnsupportedOptions(Vec<u32>),
+/// Information about a Network Block Device export.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Export {
+    pub name: String,
+    pub description: String,
+    pub size: u64,
+    pub block_size: u32,
+    pub readonly: bool,
 }
 
-/// Denotes the expected type of a Frame without knowledge of its associated
+/// The `Export(s)` which can be served by a server. Use `Exports::single` to
+/// construct a default export, or `Exports::multiple` to construct a default
+/// export with additional exports which can be accessed by name.
+#[derive(Debug, PartialEq)]
+pub struct Exports {
+    // The default export.
+    export: Export,
+    // Other exports.
+    exports: Vec<Export>,
+}
+
+impl Exports {
+    /// Serves a single `Export` as the default export.
+    pub fn single(export: Export) -> Self {
+        Self {
+            export,
+            exports: vec![],
+        }
+    }
+
+    /// Serves `default` as the default `Export`, but also serves zero or more
+    /// additional `Exports` which can be accessed by name.
+    pub fn multiple(default: Export, exports: Vec<Export>) -> Self {
+        Self {
+            export: default,
+            exports,
+        }
+    }
+}
+
+impl From<&Exports> for Vec<ListExport> {
+    /// Flattens `Exports` into a format suitable for `Vec<ListExport>`.
+    fn from(src: &Exports) -> Self {
+        let mut list = Vec::with_capacity(1 + src.exports.len());
+        list.push(src.export.clone().into());
+        list.extend(src.exports.iter().map(|export| export.clone().into()));
+        list
+    }
+}
+
+// TODO(mdlayher): make private later if possible.
+
+/// Denotes the expected type of a `Frame` without knowledge of its associated
 /// data.
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
@@ -32,21 +72,33 @@ pub enum FrameType {
     ServerUnsupportedOptions,
 }
 
+/// An NBD handshake data frame sent between client and server. Note that the
+/// frame types here do not necessarily correspond to the NBD specification, but
+/// are used to chunk up logical operations in this library.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Frame {
+    ClientOptions(ClientOptions),
+    ServerHandshake(HandshakeFlags),
+    ServerOptions(ServerOptions),
+    ServerOptionsAbort,
+    ServerUnsupportedOptions(Vec<u32>),
+}
+
 bitflags! {
     /// Valid bitflags for a server handshake.
-    pub struct HandshakeFlags: u16 {
+    pub(crate) struct HandshakeFlags: u16 {
         const FIXED_NEWSTYLE = NBD_FLAG_FIXED_NEWSTYLE;
         const NO_ZEROES      = NBD_FLAG_NO_ZEROES;
     }
 
     /// Valid bitflags for a client handshake.
-    pub struct ClientFlags: u32 {
+    pub(crate) struct ClientFlags: u32 {
         const FIXED_NEWSTYLE = NBD_FLAG_C_FIXED_NEWSTYLE;
         const NO_ZEROES      = NBD_FLAG_C_NO_ZEROES;
     }
 
     /// Valid bitflags for data transmission negotiation.
-    pub struct TransmissionFlags: u16 {
+    pub(crate) struct TransmissionFlags: u16 {
         const HAS_FLAGS = NBD_FLAG_HAS_FLAGS;
         const READ_ONLY = NBD_FLAG_READ_ONLY;
     }
@@ -55,25 +107,25 @@ bitflags! {
 /// Options sent by the client which are parsed as either known or unknown
 /// depending on the server's capabilities.
 #[derive(Debug, PartialEq)]
-pub struct ClientOptions {
-    pub flags: ClientFlags,
-    pub known: Vec<OptionRequest>,
+pub(crate) struct ClientOptions {
+    pub(crate) flags: ClientFlags,
+    pub(crate) known: Vec<OptionRequest>,
     // Set only when parsing.
-    pub unknown: Vec<u32>,
+    pub(crate) unknown: Vec<u32>,
 }
 
 /// Options sent by the server which are parsed as either known or unknown
 /// depending on the client's capabilities.
 #[derive(Debug, Default, PartialEq)]
-pub struct ServerOptions {
-    pub known: Vec<OptionResponse>,
+pub(crate) struct ServerOptions {
+    pub(crate) known: Vec<OptionResponse>,
     // Set only when parsing.
-    pub unknown: Vec<u32>,
+    pub(crate) unknown: Vec<u32>,
 }
 
 impl ServerOptions {
     /// Produces a `Frame::ServerOptions` with the known options field set.
-    pub fn from_server(known: Vec<OptionResponse>) -> Frame {
+    pub(crate) fn from_server(known: Vec<OptionResponse>) -> Frame {
         Frame::ServerOptions(Self {
             known,
             unknown: Vec::new(),
@@ -81,49 +133,10 @@ impl ServerOptions {
     }
 }
 
-/// Information about the Network Block Device being served.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Export {
-    pub name: String,
-    pub description: String,
-    pub size: u64,
-    pub block_size: u32,
-    pub readonly: bool,
-}
-
-/// The `Export(s)` which can be served by a server. The first export becomes
-/// the default export for clients which do not request the use of a specific
-/// export. Any additional exports must be referred to by name.
-#[derive(Debug, PartialEq)]
-pub struct Exports(Export, Vec<Export>);
-
-impl Exports {
-    /// Serves a single `Export` as the default export.
-    pub fn single(export: Export) -> Self {
-        Self(export, vec![])
-    }
-
-    /// Serves `default` as the default `Export`, but also serves zero or more
-    /// additional `Exports` which can be queried by name.
-    pub fn multiple(default: Export, exports: Vec<Export>) -> Self {
-        Self(default, exports)
-    }
-}
-
-impl From<&Exports> for Vec<ListExport> {
-    /// Flattens `Exports` into a format suitable for `Vec<ListExport>`.
-    fn from(src: &Exports) -> Self {
-        let mut list = Vec::with_capacity(1 + src.1.len());
-        list.push(src.0.clone().into());
-        list.extend(src.1.iter().map(|export| export.clone().into()));
-        list
-    }
-}
-
 /// Denotes the type of known options which can be handled by the server.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
-pub enum OptionCode {
+pub(crate) enum OptionCode {
     Abort = NBD_OPT_ABORT,
     Go = NBD_OPT_GO,
     Info = NBD_OPT_INFO,
@@ -132,7 +145,7 @@ pub enum OptionCode {
 
 /// The contents of known options which a client can send to a server.
 #[derive(Debug, PartialEq)]
-pub enum OptionRequest {
+pub(crate) enum OptionRequest {
     Abort,
     // Go and Info ask for the same information, but Go causes data transmission
     // to immediately begin. The only other way to enter transmission after Info
@@ -145,7 +158,7 @@ pub enum OptionRequest {
 /// The contents of known options which a server can respond to on behalf of a
 /// client.
 #[derive(Debug, PartialEq)]
-pub enum OptionResponse {
+pub(crate) enum OptionResponse {
     Abort,
     Go(GoResponse),
     Info(GoResponse),
@@ -216,7 +229,7 @@ impl OptionRequest {
 impl OptionResponse {
     /// Converts an `OptionRequest` into the matching `OptionResponse` while
     /// also associating additional data such as the `Exports` being served.
-    pub fn from_request(src: OptionRequest, exports: &Exports) -> Self {
+    pub(crate) fn from_request(src: OptionRequest, exports: &Exports) -> Self {
         match src {
             OptionRequest::Abort => Self::Abort,
             OptionRequest::Go(req) => Self::Go(Self::go(req, exports)),
@@ -226,22 +239,22 @@ impl OptionResponse {
     }
 
     /// Produces the appropriate `GoResponse` for a `GoRequest` which may ask
-    /// for a specifid `Export`.
+    /// for a specified `Export`.
     fn go(req: GoRequest, exports: &Exports) -> GoResponse {
         match req.name {
             Some(name) => {
-                if name == exports.0.name {
+                if name == exports.export.name {
                     // Name matches the default, use it.
                     return GoResponse::Ok {
                         info_requests: req.info_requests,
-                        export: exports.0.clone(),
+                        export: exports.export.clone(),
                     };
                 }
 
                 // Name must match one of the extra exports or we return unknown
                 // export to the client.
                 let matched: Vec<&Export> = exports
-                    .1
+                    .exports
                     .iter()
                     .filter(|export| export.name == name)
                     .collect();
@@ -257,7 +270,7 @@ impl OptionResponse {
             // Use the default export.
             None => GoResponse::Ok {
                 info_requests: req.info_requests,
-                export: exports.0.clone(),
+                export: exports.export.clone(),
             },
         }
     }
@@ -275,14 +288,14 @@ impl OptionResponse {
 
 /// A Go option as sent by a client.
 #[derive(Debug, PartialEq)]
-pub struct GoRequest {
-    pub name: Option<String>,
-    pub info_requests: Vec<InfoType>,
+pub(crate) struct GoRequest {
+    pub(crate) name: Option<String>,
+    pub(crate) info_requests: Vec<InfoType>,
 }
 
 /// A Go option as sent by a server in response to a client.
 #[derive(Debug, PartialEq)]
-pub enum GoResponse {
+pub(crate) enum GoResponse {
     Ok {
         info_requests: Vec<InfoType>,
         export: Export,
@@ -293,7 +306,7 @@ pub enum GoResponse {
 /// Denotes the type of an information request from a client.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
-pub enum InfoType {
+pub(crate) enum InfoType {
     Export = NBD_INFO_EXPORT,
     Name = NBD_INFO_NAME,
     Description = NBD_INFO_DESCRIPTION,
@@ -425,7 +438,7 @@ impl GoResponse {
 
 /// Information returned by the `ListResponse` type.
 #[derive(Debug, PartialEq)]
-pub struct ListExport {
+pub(crate) struct ListExport {
     name: String,
     metadata: String,
 }
@@ -453,7 +466,7 @@ impl From<Export> for ListExport {
 /// A List option as sent by a server in response to a client, containing data
 /// about each `ListExport` this server can serve.
 #[derive(Debug, PartialEq)]
-pub struct ListResponse(pub Vec<ListExport>);
+pub(crate) struct ListResponse(pub(crate) Vec<ListExport>);
 
 impl ListResponse {
     /// Writes the bytes describing the exports to `dst`.
@@ -485,7 +498,7 @@ impl ListResponse {
 impl Frame {
     /// Determines if enough data is available to parse a `Frame` of the given
     /// `FrameType` from `src`.
-    pub fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
+    pub(crate) fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
         match frame_type {
             FrameType::ClientOptions => {
                 // flags u32
@@ -536,7 +549,7 @@ impl Frame {
     }
 
     /// Parses the next `Frame` according to the given `FrameType`.
-    pub fn parse(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
+    pub(crate) fn parse(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
         match frame_type {
             FrameType::ClientOptions => {
                 let flags = ClientFlags::from_bits(get_u32(src)?)
@@ -614,7 +627,7 @@ impl Frame {
 
     /// Writes the current `Frame` out to `dst`. It returns `Some(())` if any
     /// bytes were written to the stream or `None` if not.
-    pub async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<Option<()>> {
+    pub(crate) async fn write<S: AsyncWrite + Unpin>(&self, dst: &mut S) -> io::Result<Option<()>> {
         match self {
             Frame::ClientOptions(options) => {
                 // When we write a Frame, it doesn't makes sense to provide

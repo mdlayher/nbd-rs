@@ -1,8 +1,8 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
-use crate::handshake::connection::RawConnection;
 use crate::handshake::frame::*;
+use crate::handshake::RawConnection;
 
 /// An NBD client connection which can query information and perform I/O
 /// transmission operations with a server export.
