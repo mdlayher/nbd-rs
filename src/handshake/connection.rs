@@ -1,118 +1,9 @@
 use bytes::{Buf, BytesMut};
 use std::io::{self, Cursor};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
-    net::{TcpStream, ToSocketAddrs},
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
 use super::frame::*;
 use crate::transmit::connection::ServerIoConnection;
-
-/// An NBD client connection which can query information and perform I/O
-/// transmission operations with a server export.
-pub struct Client<S> {
-    conn: RawConnection<S>,
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
-    /// Establishes a TCP connection with the NBD server at `addr` and
-    /// immediately performs the client handshake operation. The resulting
-    /// `Client` can then be used to query metadata or perform I/O transmission
-    /// operations.
-    pub async fn connect<T: ToSocketAddrs>(addr: T) -> crate::Result<Client<TcpStream>> {
-        // Set TCP_NODELAY, per:
-        // https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md#protocol-phases.
-        let stream = TcpStream::connect(addr).await?;
-        stream.set_nodelay(true)?;
-
-        Client::handshake(stream).await
-    }
-
-    /// Initiates the NBD client handshake with a server using `stream`
-    /// (typically a TCP connection, but this is not required) to produce a
-    /// `Client` which can then query metadata or perform I/O transmission
-    /// operations.
-    pub async fn handshake(stream: S) -> crate::Result<Self> {
-        let mut conn = RawConnection::new(stream);
-
-        // Expect the client and server to support the fixed newstyle handshake
-        // with no zeroes flag enabled.
-        let server_flags = match conn
-            .read_frame(FrameType::ServerHandshake)
-            .await?
-            .ok_or("server terminated connection while reading server handshake")?
-        {
-            Frame::ServerHandshake(flags) => flags,
-            _ => return Err("server sent invalid server handshake".into()),
-        };
-
-        if !server_flags.contains(HandshakeFlags::FIXED_NEWSTYLE | HandshakeFlags::NO_ZEROES) {
-            return Err("cannot negotiate fixed newstyle handshake with server".into());
-        }
-
-        Ok(Self { conn })
-    }
-
-    /// Performs an Info request to fetch `Export` metadata from the server. If
-    /// `name` is `None`, the server's default export is fetched. If no export
-    /// matching `name` could be found, `None` is returned.
-    pub async fn info(&mut self, name: Option<&str>) -> crate::Result<Option<Export>> {
-        // TODO(mdlayher): this feels awkward to get a String back from &str but
-        // the mini-redis example does roughly the same.
-        let name = name.map(|string| string.to_string());
-
-        let options = self
-            .options(OptionRequest::Info(GoRequest {
-                name,
-                info_requests: vec![
-                    InfoType::Export,
-                    InfoType::Name,
-                    InfoType::Description,
-                    InfoType::BlockSize,
-                ],
-            }))
-            .await?;
-
-        match &options[..] {
-            [OptionResponse::Info(GoResponse::Ok { export, .. })] => Ok(Some(export.clone())),
-            // TODO(mdlayher): display error strings? Add Error::NotFound?
-            [OptionResponse::Info(GoResponse::Unknown(_))] => Ok(None),
-            _ => Err("server did not send an info response server option".into()),
-        }
-    }
-
-    /// Sends a raw `OptionRequest` for a known option and returns one or more
-    /// raw `OptionResponse` values.
-    async fn options(&mut self, option: OptionRequest) -> crate::Result<Vec<OptionResponse>> {
-        self.conn
-            .write_frame(Frame::ClientOptions(ClientOptions {
-                flags: ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
-                known: vec![option],
-                unknown: Vec::new(),
-            }))
-            .await?;
-
-        let server_options = match self
-            .conn
-            .read_frame(FrameType::ServerOptions)
-            .await?
-            .ok_or("server terminated connection while reading server options")?
-        {
-            Frame::ServerOptions(options) => options,
-            _ => return Err("server sent invalid server options".into()),
-        };
-
-        if !server_options.unknown.is_empty() {
-            return Err(format!(
-                "server did not recognize options: {:?}",
-                server_options.unknown,
-            )
-            .into());
-        }
-
-        Ok(server_options.known)
-    }
-}
 
 // TODO(mdlayher): Server type to listen and produce ServerConnections.
 
@@ -249,14 +140,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
 
 /// A low level NBD connection type which deals with reading and writing
 /// `Frames` rather than high-level operations.
-struct RawConnection<S> {
+pub(crate) struct RawConnection<S> {
     stream: BufWriter<S>,
     buffer: BytesMut,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     /// Creates an NBD server connection from `stream`.
-    fn new(stream: S) -> Self {
+    pub(crate) fn new(stream: S) -> Self {
         RawConnection {
             stream: BufWriter::new(stream),
             buffer: BytesMut::with_capacity(8 * 1024),
@@ -265,7 +156,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
 
     /// Reads a single `Frame` of the specified `FrameType` from the underlying
     /// stream.
-    async fn read_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
+    pub(crate) async fn read_frame(
+        &mut self,
+        frame_type: FrameType,
+    ) -> crate::Result<Option<Frame>> {
         loop {
             if let Some(frame) = self.parse_frame(frame_type)? {
                 // We read enough data to parse an entire frame, return it now.
@@ -286,7 +180,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     }
 
     /// Write a single `Frame` value to the underlying stream.
-    async fn write_frame(&mut self, frame: Frame) -> io::Result<()> {
+    pub(crate) async fn write_frame(&mut self, frame: Frame) -> io::Result<()> {
         if frame.write(&mut self.stream).await?.is_some() {
             // Wrote a frame, flush it now.
             self.stream.flush().await
@@ -320,71 +214,5 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
             // Failed to parse.
             Err(e) => Err(e.into()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::consts::*;
-    use std::sync::Arc;
-    use tokio::net;
-
-    #[tokio::test]
-    async fn info() {
-        // Start a locally bound TCP listener and connect to it via another
-        // socket so we can perform client/server testing.
-        let listener = net::TcpListener::bind("localhost:0")
-            .await
-            .expect("failed to listen");
-
-        let client = Client::<TcpStream>::connect(
-            listener
-                .local_addr()
-                .expect("failed to get listener address"),
-        );
-
-        let exports = Arc::new(Exports::single(Export {
-            name: "foo".to_string(),
-            description: "bar".to_string(),
-            size: 256 * MiB,
-            block_size: 512,
-            readonly: true,
-        }));
-
-        let server_exports = exports.clone();
-        let server_handle = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.expect("failed to accept");
-
-            // TODO(mdlayher): make tests for data transmission phase later.
-            if ServerConnection::new(socket)
-                .handshake(&server_exports)
-                .await
-                .expect("failed to perform server handshake")
-                .is_some()
-            {
-                panic!("server should not have negotiated data transmission")
-            }
-        });
-
-        let client_exports = exports.clone();
-        let client_handle = tokio::spawn(async move {
-            let mut client = client.await.expect("failed to complete client handshake");
-
-            let export = client
-                .info(None)
-                .await
-                .expect("failed to fetch default export")
-                .expect("no default export was found");
-            let got_exports = Exports::single(export);
-
-            assert_eq!(
-                *client_exports, got_exports,
-                "unexpected export received by client"
-            );
-        });
-
-        client_handle.await.expect("failed to run client");
-        server_handle.await.expect("failed to run server");
     }
 }

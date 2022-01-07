@@ -9,7 +9,8 @@ mod frame;
 mod handshake;
 mod transmit;
 
-pub use handshake::connection::{Client, ServerConnection};
+pub use handshake::client::Client;
+pub use handshake::connection::ServerConnection;
 pub use handshake::frame::{Export, Exports};
 pub use transmit::connection::ServerIoConnection;
 
