@@ -1,8 +1,10 @@
-use tokio::io::{AsyncRead, AsyncWrite};
+use bytes::BytesMut;
+use std::io::{Read, Seek, Write};
+use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
 
-use super::connection::RawConnection;
-use super::frame::*;
-use crate::transmit::connection::ServerIoConnection;
+use crate::handshake::connection::RawConnection;
+use crate::handshake::frame::*;
+use crate::transmit::connection::RawIoConnection;
 
 // TODO(mdlayher): Server type to listen and produce ServerConnections.
 
@@ -134,5 +136,35 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 _ => continue,
             };
         }
+    }
+}
+
+/// An NBD server connection which is ready to perform data transmission.
+/// Calling the `transmit` method will consume the connection and block until
+/// the NBD client disconnects.
+pub struct ServerIoConnection<S> {
+    stream: BufWriter<S>,
+    buffer: BytesMut,
+    readonly: bool,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
+    /// Creates a connection ready for I/O by consuming the stream and buffer
+    /// from the handshake phase.
+    pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, readonly: bool) -> Self {
+        Self {
+            stream,
+            buffer,
+            readonly,
+        }
+    }
+
+    /// Begins data transmission with a client using `device` as the export for
+    /// I/O operations. This method blocks until the client disconnects or an
+    /// unrecoverable error occurs.
+    pub async fn transmit<D: Read + Write + Seek>(self, device: D) -> crate::Result<()> {
+        RawIoConnection::new(device, self.stream, self.buffer, self.readonly)
+            .serve()
+            .await
     }
 }

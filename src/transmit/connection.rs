@@ -5,37 +5,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use super::frame::{Errno, Frame};
 use crate::frame::Error;
 
-/// An NBD server connection which is ready to perform data transmission.
-/// Calling the `transmit` method will consume the connection and block until
-/// the NBD client disconnects.
-pub struct ServerIoConnection<S> {
-    stream: BufWriter<S>,
-    buffer: BytesMut,
-    readonly: bool,
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
-    /// Creates a connection ready for I/O by consuming the stream and buffer
-    /// from the handshake phase.
-    pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, readonly: bool) -> Self {
-        Self {
-            stream,
-            buffer,
-            readonly,
-        }
-    }
-
-    /// Begins data transmission with a client using `device` as the export for
-    /// I/O operations. This method blocks until the client disconnects or an
-    /// unrecoverable error occurs.
-    pub async fn transmit<D: Read + Write + Seek>(self, device: D) -> crate::Result<()> {
-        RawIoConnection::new(device, self).serve().await
-    }
-}
-
 /// A low level NBD connection type which handles data transmission operations
 /// between a client stream and an exported device.
-struct RawIoConnection<D, S> {
+pub(crate) struct RawIoConnection<D, S> {
     device: D,
     device_buffer: Vec<u8>,
     stream: BufWriter<S>,
@@ -51,22 +23,27 @@ where
     D: Read + Write + Seek,
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Consumes a `ServerIoConnection` and allocates buffers to begin handling
-    /// I/O for `device`.
-    fn new(device: D, conn: ServerIoConnection<S>) -> Self {
+    /// Consumes the fields of a `ServerIoConnection` and allocates buffers to
+    /// begin handling I/O for `device`.
+    pub(crate) fn new(
+        device: D,
+        stream: BufWriter<S>,
+        stream_buffer: BytesMut,
+        readonly: bool,
+    ) -> Self {
         Self {
             device,
             // TODO(mdlayher): Linux seems to perform 128KiB reads, good enough?
             device_buffer: vec![0u8; 256 * 1024],
-            stream: conn.stream,
-            stream_buffer: conn.buffer,
-            _readonly: conn.readonly,
+            stream,
+            stream_buffer,
+            _readonly: readonly,
         }
     }
 
     /// Serves I/O requests on the connection until the client disconnects or an
     /// error occurs.
-    async fn serve(&mut self) -> crate::Result<()> {
+    pub(crate) async fn serve(&mut self) -> crate::Result<()> {
         loop {
             if self.next_io().await?.is_some() {
                 // Frame handled, try the next one.

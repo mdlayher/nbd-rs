@@ -8,12 +8,12 @@ mod client;
 mod consts;
 mod frame;
 mod handshake;
+mod server;
 mod transmit;
 
 pub use client::Client;
 pub use handshake::frame::{Export, Exports};
-pub use handshake::server::ServerConnection;
-pub use transmit::connection::ServerIoConnection;
+pub use server::{ServerConnection, ServerIoConnection};
 
 /// A generic Error produced by this crate.
 ///
