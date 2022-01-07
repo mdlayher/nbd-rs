@@ -10,8 +10,8 @@ mod handshake;
 mod transmit;
 
 pub use handshake::client::Client;
-pub use handshake::connection::ServerConnection;
 pub use handshake::frame::{Export, Exports};
+pub use handshake::server::ServerConnection;
 pub use transmit::connection::ServerIoConnection;
 
 /// A generic Error produced by this crate.

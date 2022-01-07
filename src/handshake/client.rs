@@ -1,7 +1,5 @@
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::{TcpStream, ToSocketAddrs},
-};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpStream, ToSocketAddrs};
 
 use super::connection::RawConnection;
 use super::frame::*;
