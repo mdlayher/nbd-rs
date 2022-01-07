@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-extern crate nbd_rs;
-use nbd_rs::{Export, Exports, Result, ServerConnection};
+extern crate mdl_nbd;
+use mdl_nbd::{Export, Exports, Result, ServerConnection};
 
 /// A symbolic constant for 1 GiB.
 #[allow(non_upper_case_globals)]

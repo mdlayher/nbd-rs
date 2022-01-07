@@ -1,7 +1,7 @@
 use tokio::net::TcpStream;
 
-extern crate nbd_rs;
-use nbd_rs::Client;
+extern crate mdl_nbd;
+use mdl_nbd::Client;
 
 #[tokio::main]
 async fn main() {

@@ -1,12 +1,12 @@
 [package]
-name = "nbd-rs"
+name = "mdl-nbd"
 version = "0.1.0"
 edition = "2021"
 authors = ["Matt Layher <mdlayher@gmail.com>"]
 license = "MIT"
 homepage = "https://github.com/mdlayher/nbd-rs"
 repository = "https://github.com/mdlayher/nbd-rs"
-keywords = ["nbd"]
+keywords = ["nbd", "nbd-server", "nbd-client", "tokio"]
 description = """
 An asynchronous Rust client and server implementation of the [Network Block
 Device (NBD)](https://en.wikipedia.org/wiki/Network_block_device) protocol.
