@@ -1,5 +1,8 @@
+use std::fs::File;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
 extern crate nbd_rs;
 use nbd_rs::{Export, Exports, Result, ServerConnection};
@@ -14,53 +17,67 @@ async fn main() {
         .await
         .expect("failed to listen");
 
-    let exports = Arc::new(Exports::multiple(
-        Export {
-            name: "mdlayher nbd-rs".to_string(),
-            description: "An NBD server written in Rust".to_string(),
-            size: 256 * MiB,
-            block_size: 512,
-            readonly: true,
-        },
-        vec![
-            Export {
-                name: "big".to_string(),
-                description: "A large export".to_string(),
-                size: 1024 * MiB,
-                block_size: 4096,
-                readonly: true,
-            },
-            Export {
-                name: "small".to_string(),
-                description: "A small export".to_string(),
-                size: MiB,
-                block_size: 512,
-                readonly: true,
-            },
-        ],
+    let exports = Arc::new(Exports::single(Export {
+        name: "mdlayher nbd-rs".to_string(),
+        description: "An NBD server written in Rust".to_string(),
+        size: 256 * MiB,
+        block_size: 4096,
+        readonly: true,
+    }));
+
+    let device = Arc::new(Mutex::new(
+        File::open("disk.img").expect("failed to open disk file"),
     ));
 
     loop {
         let (socket, addr) = listener.accept().await.expect("failed to accept");
 
         let exports = exports.clone();
+        let device = device.clone();
         tokio::spawn(async move {
-            let mut conn = ServerConnection::new(socket);
-            if let Err(err) = process(&mut conn, &exports).await {
-                println!("{:?}: error: {}", addr, err);
+            let conn = ServerConnection::new(socket);
+            println!("{:?}: client connected", addr);
+
+            if let Err(err) = process(conn, addr, &exports, device).await {
+                println!("{:?}: error: {:?}", addr, err);
+                return;
             }
+
+            println!("{:?}: client disconnected", addr);
         });
     }
 }
 
-async fn process(conn: &mut ServerConnection<TcpStream>, exports: &Exports) -> Result<()> {
+async fn process(
+    conn: ServerConnection<TcpStream>,
+    addr: SocketAddr,
+    exports: &Exports,
+    device: Arc<Mutex<File>>,
+) -> Result<()> {
     // Perform the initial handshake. The client and server may negotiate back
     // and forth several times.
-    if conn.handshake(exports).await?.is_none() {
+    let (conn, export) = match conn.handshake(exports).await? {
+        Some(conn) => conn,
         // Client didn't wish to initiate data transmission, do nothing.
-        return Ok(());
-    }
+        None => return Ok(()),
+    };
 
-    // Client is ready to transmit data.
-    conn.transmit().await
+    // TODO(mdlayher): encode device lock state into the handshake so we can
+    // an error to clients when an export is in use.
+    println!("{:?}: waiting for lock on export {}...", addr, export.name);
+    let device = device.lock().await;
+
+    println!(
+        "{:?}: lock acquired, starting I/O for export {:?}",
+        addr, export
+    );
+
+    // TODO(mdlayher): use an enum to enforce read-only access when the export
+    // says it is read-only.
+    if export.readonly {
+        // Client is ready to transmit data.
+        conn.transmit(&*device).await
+    } else {
+        Err("this server only supports read-only exports".into())
+    }
 }

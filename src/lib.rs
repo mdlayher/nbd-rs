@@ -4,12 +4,14 @@
 extern crate bitflags;
 extern crate num_derive;
 
-mod connection;
 mod consts;
 mod frame;
+mod handshake;
+mod transmit;
 
-pub use connection::{Client, ServerConnection};
-pub use frame::{Export, Exports};
+pub use handshake::connection::{Client, ServerConnection};
+pub use handshake::frame::{Export, Exports};
+pub use transmit::connection::ServerIoConnection;
 
 /// A generic Error produced by this crate.
 ///

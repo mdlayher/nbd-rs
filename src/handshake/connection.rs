@@ -5,7 +5,8 @@ use tokio::{
     net::{TcpStream, ToSocketAddrs},
 };
 
-use crate::frame::{self, *};
+use super::frame::*;
+use crate::transmit::connection::ServerIoConnection;
 
 /// An NBD client connection which can query information and perform I/O
 /// transmission operations with a server export.
@@ -110,8 +111,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 
 // TODO(mdlayher): Server type to listen and produce ServerConnections.
 
-/// An NBD server connection which can perform I/O transmission operations with
-/// a client.
+/// An NBD server connection which can negotiate options with a client.
 pub struct ServerConnection<S> {
     conn: RawConnection<S>,
 }
@@ -130,9 +130,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     /// metadata from `exports`. It is possible for a client to query the server
     /// for options multiple times before initiating data transmission.
     ///
-    /// If the client wishes to read data from the server without initiating the
-    /// data transmission phase, `Ok(None)` will be returned.
-    pub async fn handshake(&mut self, exports: &Exports) -> crate::Result<Option<()>> {
+    /// If the client reads data from the server and disconnects without
+    /// initiating the data transmission phase, `Ok(None)` will be returned.
+    ///
+    /// If the client is ready for data transmission, `Some((ServerIoConnection,
+    /// Export))` will be returned so data transmission can begin using the
+    /// client's chosen export.
+    pub async fn handshake(
+        mut self,
+        exports: &Exports,
+    ) -> crate::Result<Option<(ServerIoConnection<S>, Export)>> {
         // Send opening handshake, then negotiate options with client.
         self.conn
             .write_frame(Frame::ServerHandshake(
@@ -191,7 +198,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 .write_frame(Frame::ServerUnsupportedOptions(client_options.unknown))
                 .await?;
 
-            let do_transmit = response.iter().any(OptionResponse::do_transmit);
+            // Data transmission requires that the client both sent a Go option
+            // request and requested a valid export. These nested options handle
+            // both of those conditions.
+            let maybe_transmit: Option<Option<Export>> = response
+                .iter()
+                .map(|res| {
+                    if let OptionResponse::Go(GoResponse::Ok { export, .. }) = res {
+                        // Valid export.
+                        Some(export.clone())
+                    } else {
+                        // Invalid export.
+                        None
+                    }
+                })
+                .next();
 
             dbg!(&response);
 
@@ -200,27 +221,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 .write_frame(ServerOptions::from_server(response))
                 .await?;
 
-            if do_transmit {
-                // Handshake complete, ready for transmission.
-                return Ok(Some(()));
-            }
+            match maybe_transmit {
+                Some(Some(export)) => {
+                    // Client requested Go and a valid export, prepare for
+                    // I/O.
+                    return Ok(Some((
+                        ServerIoConnection::new(
+                            self.conn.stream,
+                            self.conn.buffer,
+                            export.readonly,
+                        ),
+                        export,
+                    )));
+                }
+                // Client did not request Go or client did not request a valid
+                // export.
+                _ => continue,
+            };
         }
-    }
-
-    // TODO(mdlayher): probably make a TransmitConnection type so it's harder to
-    // misuse the API by transmitting before handshake.
-
-    /// Begins the data transmission phase of the NBD protocol with a client
-    /// which previously completed the NBD handshake.
-    pub async fn transmit(&mut self) -> crate::Result<()> {
-        // TODO(mdlayher): implement!
-
-        let n = self.conn.stream.read_buf(&mut self.conn.buffer).await?;
-        let mut _cursor = Cursor::new(&self.conn.buffer[..n]);
-
-        dbg!(&self.conn.buffer[..n]);
-
-        Ok(())
     }
 }
 
@@ -275,7 +293,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     /// Try to parse a single `Frame` but also terminate early with an
     /// incomplete error if we need to read more data from the stream.
     fn parse_frame(&mut self, frame_type: FrameType) -> crate::Result<Option<Frame>> {
-        use frame::Error::Incomplete;
+        use crate::frame::Error::Incomplete;
 
         // Begin checking the data we have buffered and see if we can return an
         // entire Frame of the specified type.
@@ -334,12 +352,14 @@ mod tests {
             let (socket, _) = listener.accept().await.expect("failed to accept");
 
             // TODO(mdlayher): make tests for data transmission phase later.
-            let mut conn = ServerConnection::new(socket);
-            conn.handshake(&server_exports)
+            match ServerConnection::new(socket)
+                .handshake(&server_exports)
                 .await
                 .expect("failed to perform server handshake")
-                .ok_or(())
-                .expect_err("handshake should not have negotiated data transmission");
+            {
+                Some(_) => panic!("server should not have negotiated data transmission"),
+                None => {}
+            };
         });
 
         let client_exports = exports.clone();
