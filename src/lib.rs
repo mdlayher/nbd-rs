@@ -4,12 +4,13 @@
 extern crate bitflags;
 extern crate num_derive;
 
+mod client;
 mod consts;
 mod frame;
 mod handshake;
 mod transmit;
 
-pub use handshake::client::Client;
+pub use client::Client;
 pub use handshake::frame::{Export, Exports};
 pub use handshake::server::ServerConnection;
 pub use transmit::connection::ServerIoConnection;
