@@ -32,6 +32,10 @@ async fn main() {
     loop {
         let (socket, addr) = listener.accept().await.expect("failed to accept");
 
+        // Set TCP_NODELAY, per:
+        // https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md#protocol-phases.
+        socket.set_nodelay(true).expect("failed to set TCP_NODELAY");
+
         let exports = exports.clone();
         let device = device.clone();
         tokio::spawn(async move {

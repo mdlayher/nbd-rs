@@ -20,7 +20,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
     /// `Client` can then be used to query metadata or perform I/O transmission
     /// operations.
     pub async fn connect<T: ToSocketAddrs>(addr: T) -> crate::Result<Client<TcpStream>> {
-        Client::handshake(TcpStream::connect(addr).await?).await
+        // Set TCP_NODELAY, per:
+        // https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md#protocol-phases.
+        let stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+
+        Client::handshake(stream).await
     }
 
     /// Initiates the NBD client handshake with a server using `stream`
