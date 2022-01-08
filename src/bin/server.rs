@@ -9,7 +9,7 @@ const GiB: u64 = 1 << 30;
 
 // Snippet for testing:
 //
-// sudo nbd-client ::1 && sudo dd if=/dev/nbd0 of=/dev/null && for i in `seq 0 15`; do sudo nbd-client -d /dev/nbd$i; done
+// sudo modprobe nbd && sudo nbd-client ::1 && sudo dd if=/dev/nbd0 of=/dev/null && for i in `seq 0 15`; do sudo nbd-client -d /dev/nbd$i; done
 
 #[tokio::main]
 async fn main() {

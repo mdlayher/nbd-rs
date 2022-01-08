@@ -2,6 +2,7 @@ use bytes::BytesMut;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -65,6 +66,11 @@ impl Server {
         let listener = TcpListener::bind(addr).await?;
 
         Ok(Server { listener })
+    }
+
+    /// Returns the local address that the `Server`'s TCP listener is bound to.
+    pub fn local_addr(&self) -> crate::Result<SocketAddr> {
+        Ok(self.listener.local_addr()?)
     }
 
     /// Continuously accepts and serves incoming NBD connections for `devices`.
