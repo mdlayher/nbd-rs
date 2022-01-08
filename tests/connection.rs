@@ -21,7 +21,7 @@ async fn info() {
             .expect("failed to get listener address"),
     );
 
-    let exports = Arc::new(Exports::single(Export {
+    let exports = Arc::new(Exports::new(Export {
         name: "foo".to_string(),
         description: "bar".to_string(),
         size: 256 * MiB,
@@ -53,7 +53,7 @@ async fn info() {
             .await
             .expect("failed to fetch default export")
             .expect("no default export was found");
-        let got_exports = Exports::single(export);
+        let got_exports = Exports::new(export);
 
         assert_eq!(
             *client_exports, got_exports,

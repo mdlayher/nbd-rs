@@ -13,7 +13,7 @@ mod transmit;
 
 pub use client::Client;
 pub use handshake::frame::{Export, Exports};
-pub use server::{ServerConnection, ServerIoConnection};
+pub use server::{Devices, Server, ServerConnection, ServerIoConnection};
 
 /// A generic Error produced by this crate.
 ///

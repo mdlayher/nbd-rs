@@ -19,9 +19,7 @@ pub struct Export {
     pub readonly: bool,
 }
 
-/// One or more [`Export`]s which can be served by a server. Use [`Exports::single`] to
-/// construct a default export, or [`Exports::multiple`] to construct a default
-/// export with additional exports which can be accessed by name.
+/// One or more [`Export`]s which can be exposed via the NBD server handshake.
 #[derive(Debug, PartialEq)]
 pub struct Exports {
     // The default export.
@@ -32,20 +30,17 @@ pub struct Exports {
 
 impl Exports {
     /// Serves a single `Export` as the default export.
-    pub fn single(export: Export) -> Self {
+    pub fn new(export: Export) -> Self {
         Self {
             export,
             exports: vec![],
         }
     }
 
-    /// Serves `default` as the default `Export`, but also serves zero or more
-    /// additional `Exports` which can be accessed by name.
-    pub fn multiple(default: Export, exports: Vec<Export>) -> Self {
-        Self {
-            export: default,
-            exports,
-        }
+    /// Adds an additional non-default `Export` which may be queried by name.
+    pub fn add(&mut self, export: Export) -> &mut Self {
+        self.exports.push(export);
+        self
     }
 }
 

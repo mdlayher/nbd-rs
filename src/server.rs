@@ -1,12 +1,109 @@
 use bytes::BytesMut;
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Seek, Write};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::handshake::frame::*;
 use crate::handshake::RawConnection;
 use crate::transmit::RawIoConnection;
 
-// TODO(mdlayher): Server type to listen and produce ServerConnections.
+/// An NBD server which can accept incoming TCP connections and serve one or
+/// more exported devices for client use.
+pub struct Server {
+    listener: TcpListener,
+}
+
+/// Export metadata and device handles which are managed by a [`Server`].
+pub struct Devices {
+    exports: Exports,
+    devices: HashMap<String, Mutex<File>>,
+}
+
+impl Devices {
+    /// Constructs a new `Devices` using `export` as the default export and
+    /// `device` as the device for I/O transmission operations.
+    pub fn new(export: Export, device: File) -> Self {
+        let mut devices = HashMap::with_capacity(1);
+        devices.insert(export.name.clone(), Mutex::new(device));
+
+        Self {
+            exports: Exports::new(export),
+            devices,
+        }
+    }
+
+    /// Adds an additional named export and device handle which may be queried
+    /// by name.
+    pub fn add(&mut self, export: Export, device: File) -> &mut Self {
+        let name = export.name.clone();
+        self.exports.add(export);
+        self.devices.insert(name, Mutex::new(device));
+        self
+    }
+
+    /// Acquires a lock on a given named export for exclusive client use.
+    async fn lock(&self, name: &str) -> MutexGuard<'_, File> {
+        // We control the list of exports so it should be impossible to fail to
+        // look up an export by name when using the Server type.
+        let mutex = self
+            .devices
+            .get(name)
+            .expect("invariant violation: name was never added to the devices map");
+
+        mutex.lock().await
+    }
+}
+
+impl Server {
+    /// Binds a TCP listener for the NBD server at `addr` which is prepared to
+    /// accept incoming connections.
+    pub async fn bind<T: ToSocketAddrs>(addr: T) -> crate::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+
+        Ok(Server { listener })
+    }
+
+    /// Continuously accepts and serves incoming NBD connections for `devices`.
+    pub async fn run(self, devices: Devices) -> crate::Result<()> {
+        let devices = Arc::new(devices);
+
+        loop {
+            let (socket, addr) = self.listener.accept().await?;
+
+            // Set TCP_NODELAY, per:
+            // https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md#protocol-phases.
+            socket.set_nodelay(true)?;
+
+            let devices = devices.clone();
+            tokio::spawn(async move {
+                let conn = ServerConnection::new(socket);
+
+                if let Err(err) = Self::process(&devices, conn).await {
+                    // TODO(mdlayher): error reporting through another channel.
+                    println!("{:?}: error: {:?}", addr, err);
+                }
+            });
+        }
+    }
+
+    /// Processes a single incoming NBD client connection.
+    async fn process(devices: &Devices, conn: ServerConnection<TcpStream>) -> crate::Result<()> {
+        let (conn, export) = match conn.handshake(&devices.exports).await? {
+            Some(conn) => conn,
+            // Client didn't wish to initiate data transmission, do nothing.
+            None => return Ok(()),
+        };
+
+        // Client wants to begin data transmission using this device, acquire a
+        // lock and hold it until transmit completes.
+        let mut file = devices.lock(&export.name).await;
+        conn.transmit(&mut *file).await
+    }
+}
 
 /// An NBD server connection which can negotiate options with a client.
 pub struct ServerConnection<S> {
