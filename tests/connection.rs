@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::net;
 
@@ -35,7 +36,7 @@ async fn info() {
 
         // TODO(mdlayher): make tests for data transmission phase later.
         if ServerConnection::new(socket)
-            .handshake(&server_exports)
+            .handshake(&server_exports, &HashSet::new())
             .await
             .expect("failed to perform server handshake")
             .is_some()

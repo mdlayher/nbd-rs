@@ -3,6 +3,7 @@ use bytes::Buf;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::cmp::max;
+use std::collections::HashSet;
 use std::io::{self, Write};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -224,18 +225,28 @@ impl OptionRequest {
 impl OptionResponse {
     /// Converts an `OptionRequest` into the matching `OptionResponse` while
     /// also associating additional data such as the `Exports` being served.
-    pub(crate) fn from_request(src: OptionRequest, exports: &Exports) -> Self {
+    pub(crate) fn from_request(
+        src: OptionRequest,
+        exports: &Exports,
+        locks: &HashSet<String>,
+    ) -> Self {
         match src {
             OptionRequest::Abort => Self::Abort,
-            OptionRequest::Go(req) => Self::Go(Self::go(req, exports)),
-            OptionRequest::Info(req) => Self::Info(Self::go(req, exports)),
+            // TODO(mdlayher): tidy up locks.
+            OptionRequest::Go(req) => Self::Go(Self::go(req, GoOrInfo::Go, exports, locks)),
+            OptionRequest::Info(req) => Self::Info(Self::go(req, GoOrInfo::Info, exports, locks)),
             OptionRequest::List => Self::List(ListResponse(exports.into())),
         }
     }
 
     /// Produces the appropriate `GoResponse` for a `GoRequest` which may ask
     /// for a specified `Export`.
-    fn go(req: GoRequest, exports: &Exports) -> GoResponse {
+    fn go(
+        req: GoRequest,
+        code: GoOrInfo,
+        exports: &Exports,
+        locks: &HashSet<String>,
+    ) -> GoResponse {
         let export = match req.name {
             Some(name) if name == exports.export.name => {
                 // Name matches the default.
@@ -259,11 +270,18 @@ impl OptionResponse {
             }
         };
 
-        // TODO(mdlayher): plumb in export locking here.
-
-        GoResponse::Ok {
-            info_requests: req.info_requests,
-            export: export.clone(),
+        // If another client is already tranmsmitting with a given export and
+        // the client sent a Go request, do not allow more connections.
+        if matches!(code, GoOrInfo::Go) && locks.contains(&export.name) {
+            GoResponse::Unknown(format!(
+                "export is locked by another client: {}",
+                export.name
+            ))
+        } else {
+            GoResponse::Ok {
+                info_requests: req.info_requests,
+                export: export.clone(),
+            }
         }
     }
 

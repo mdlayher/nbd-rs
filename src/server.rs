@@ -1,12 +1,12 @@
 use bytes::BytesMut;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::Mutex;
 
 use crate::handshake::frame::*;
 use crate::handshake::RawConnection;
@@ -21,7 +21,7 @@ pub struct Server {
 /// Export metadata and device handles which are managed by a [`Server`].
 pub struct Devices {
     exports: Exports,
-    devices: HashMap<String, Mutex<File>>,
+    devices: HashMap<String, File>,
 }
 
 impl Devices {
@@ -29,7 +29,7 @@ impl Devices {
     /// `device` as the device for I/O transmission operations.
     pub fn new(export: Export, device: File) -> Self {
         let mut devices = HashMap::with_capacity(1);
-        devices.insert(export.name.clone(), Mutex::new(device));
+        devices.insert(export.name.clone(), device);
 
         Self {
             exports: Exports::new(export),
@@ -42,20 +42,17 @@ impl Devices {
     pub fn add(&mut self, export: Export, device: File) -> &mut Self {
         let name = export.name.clone();
         self.exports.add(export);
-        self.devices.insert(name, Mutex::new(device));
+        self.devices.insert(name, device);
         self
     }
 
-    /// Acquires a lock on a given named export for exclusive client use.
-    async fn lock(&self, name: &str) -> MutexGuard<'_, File> {
+    /// Returns the handle to an export by `name` for client use.
+    async fn get(&self, name: &str) -> &File {
         // We control the list of exports so it should be impossible to fail to
         // look up an export by name when using the Server type.
-        let mutex = self
-            .devices
+        self.devices
             .get(name)
-            .expect("invariant violation: name was never added to the devices map");
-
-        mutex.lock().await
+            .expect("invariant violation: name was never added to the devices map")
     }
 }
 
@@ -76,6 +73,7 @@ impl Server {
     /// Continuously accepts and serves incoming NBD connections for `devices`.
     pub async fn run(self, devices: Devices) -> crate::Result<()> {
         let devices = Arc::new(devices);
+        let locks = Arc::new(Mutex::new(HashSet::new()));
 
         loop {
             let (socket, addr) = self.listener.accept().await?;
@@ -85,10 +83,11 @@ impl Server {
             socket.set_nodelay(true)?;
 
             let devices = devices.clone();
+            let locks = locks.clone();
             tokio::spawn(async move {
                 let conn = ServerConnection::new(socket);
 
-                if let Err(err) = Self::process(&devices, conn).await {
+                if let Err(err) = Self::process(&devices, &locks, conn).await {
                     // TODO(mdlayher): error reporting through another channel.
                     println!("{:?}: error: {:?}", addr, err);
                 }
@@ -97,17 +96,33 @@ impl Server {
     }
 
     /// Processes a single incoming NBD client connection.
-    async fn process(devices: &Devices, conn: ServerConnection<TcpStream>) -> crate::Result<()> {
-        let (conn, export) = match conn.handshake(&devices.exports).await? {
-            Some(conn) => conn,
-            // Client didn't wish to initiate data transmission, do nothing.
-            None => return Ok(()),
+    async fn process(
+        devices: &Devices,
+        locks: &Mutex<HashSet<String>>,
+        conn: ServerConnection<TcpStream>,
+    ) -> crate::Result<()> {
+        let (conn, export) = {
+            let mut locks = locks.lock().await;
+
+            let (conn, export) = match conn.handshake(&devices.exports, &locks).await? {
+                Some(conn) => conn,
+                // Client didn't wish to initiate data transmission, do nothing.
+                None => return Ok(()),
+            };
+
+            // Going to start transmission, lock this export.
+            locks.insert(export.name.clone());
+            (conn, export)
         };
 
-        // Client wants to begin data transmission using this device, acquire a
-        // lock and hold it until transmit completes.
-        let mut file = devices.lock(&export.name).await;
-        conn.transmit(&mut *file).await
+        // Client wants to begin data transmission using this device. Once
+        // transmission completes, drop the lock on the export.
+        let mut file = devices.get(&export.name).await;
+        let result = conn.transmit(&mut file).await;
+
+        let mut locks = locks.lock().await;
+        locks.remove(&export.name);
+        result
     }
 }
 
@@ -132,6 +147,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     ///
     /// If the client reads data from the server and disconnects without
     /// initiating the data transmission phase, `Ok(None)` will be returned.
+    /// Transmission will also be refused if the name of an export is already
+    /// present in `locks`, due to the export being in use by another client.
     ///
     /// If the client is ready for data transmission, `Some((ServerIoConnection,
     /// Export))` will be returned so data transmission can begin using the
@@ -139,6 +156,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     pub async fn handshake(
         mut self,
         exports: &Exports,
+        locks: &HashSet<String>,
     ) -> crate::Result<Option<(ServerIoConnection<S>, Export)>> {
         // Send opening handshake, then negotiate options with client.
         self.conn
@@ -178,7 +196,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
             let response: Vec<OptionResponse> = client_options
                 .known
                 .into_iter()
-                .map(|request| OptionResponse::from_request(request, exports))
+                .map(|request| OptionResponse::from_request(request, exports, locks))
                 .collect();
 
             if response
