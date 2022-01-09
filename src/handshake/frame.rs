@@ -236,16 +236,14 @@ impl OptionResponse {
     /// Produces the appropriate `GoResponse` for a `GoRequest` which may ask
     /// for a specified `Export`.
     fn go(req: GoRequest, exports: &Exports) -> GoResponse {
-        match req.name {
+        let export = match req.name {
+            Some(name) if name == exports.export.name => {
+                // Name matches the default.
+                &exports.export
+            }
+            // No name, use the default.
+            None => &exports.export,
             Some(name) => {
-                if name == exports.export.name {
-                    // Name matches the default, use it.
-                    return GoResponse::Ok {
-                        info_requests: req.info_requests,
-                        export: exports.export.clone(),
-                    };
-                }
-
                 // Name must match one of the extra exports or we return unknown
                 // export to the client.
                 let matched: Vec<&Export> = exports
@@ -254,19 +252,18 @@ impl OptionResponse {
                     .filter(|export| export.name == name)
                     .collect();
 
-                match &matched[..] {
-                    [export] => GoResponse::Ok {
-                        info_requests: req.info_requests,
-                        export: (*export).clone(),
-                    },
-                    _ => GoResponse::Unknown(format!("export not found: {}", name)),
+                match matched[..] {
+                    [export] => export,
+                    _ => return GoResponse::Unknown(format!("export not found: {}", name)),
                 }
             }
-            // Use the default export.
-            None => GoResponse::Ok {
-                info_requests: req.info_requests,
-                export: exports.export.clone(),
-            },
+        };
+
+        // TODO(mdlayher): plumb in export locking here.
+
+        GoResponse::Ok {
+            info_requests: req.info_requests,
+            export: export.clone(),
         }
     }
 
