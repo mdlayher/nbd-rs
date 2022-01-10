@@ -21,7 +21,11 @@ async fn main() {
             block_size: 4096,
             readonly: true,
         },
-        File::open("disk.img").expect("failed to open disk file"),
+        Box::new(|| {
+            // TODO(mdlayher): don't hard-code.
+            let f = File::open("disk.img")?;
+            Ok(f)
+        }),
     );
 
     let server = Server::bind("[::]:10809")

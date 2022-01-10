@@ -1,6 +1,5 @@
 use bytes::BytesMut;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,18 +17,22 @@ pub struct Server {
     listener: TcpListener,
 }
 
-/// Export metadata and device handles which are managed by a [`Server`].
-pub struct Devices {
+/// Export metadata and functions to open device handles which are managed by a
+/// [`Server`].
+pub struct Devices<D> {
     exports: Exports,
-    devices: HashMap<String, File>,
+    devices: HashMap<String, DeviceFn<D>>,
 }
 
-impl Devices {
+/// A function which produces a handle to a device.
+pub type DeviceFn<D> = Box<dyn Fn() -> crate::Result<D> + Send + Sync>;
+
+impl<D: Read + Write + Seek> Devices<D> {
     /// Constructs a new `Devices` using `export` as the default export and
-    /// `device` as the device for I/O transmission operations.
-    pub fn new(export: Export, device: File) -> Self {
+    /// `open` to open a device handle for I/O transmission operations.
+    pub fn new(export: Export, open: DeviceFn<D>) -> Self {
         let mut devices = HashMap::with_capacity(1);
-        devices.insert(export.name.clone(), device);
+        devices.insert(export.name.clone(), open);
 
         Self {
             exports: Exports::new(export),
@@ -37,17 +40,18 @@ impl Devices {
         }
     }
 
-    /// Adds an additional named export and device handle which may be queried
-    /// by name.
-    pub fn add(&mut self, export: Export, device: File) -> &mut Self {
+    /// Adds an additional named export and `open` device handle function. The
+    /// export can be queried by name.
+    pub fn add(&mut self, export: Export, open: DeviceFn<D>) -> &mut Self {
         let name = export.name.clone();
         self.exports.add(export);
-        self.devices.insert(name, device);
+        self.devices.insert(name, open);
         self
     }
 
-    /// Returns the handle to an export by `name` for client use.
-    async fn get(&self, name: &str) -> &File {
+    /// Returns the device handle function for an export by `name` for client
+    /// use.
+    fn get(&self, name: &str) -> &DeviceFn<D> {
         // We control the list of exports so it should be impossible to fail to
         // look up an export by name when using the Server type.
         self.devices
@@ -71,7 +75,10 @@ impl Server {
     }
 
     /// Continuously accepts and serves incoming NBD connections for `devices`.
-    pub async fn run(self, devices: Devices) -> crate::Result<()> {
+    pub async fn run<D: 'static + Read + Write + Seek + Send>(
+        self,
+        devices: Devices<D>,
+    ) -> crate::Result<()> {
         let devices = Arc::new(devices);
         let locks = Arc::new(Mutex::new(HashSet::new()));
 
@@ -96,8 +103,8 @@ impl Server {
     }
 
     /// Processes a single incoming NBD client connection.
-    async fn process(
-        devices: &Devices,
+    async fn process<D: Read + Write + Seek>(
+        devices: &Devices<D>,
         locks: &Mutex<HashSet<String>>,
         conn: ServerConnection<TcpStream>,
     ) -> crate::Result<()> {
@@ -117,11 +124,15 @@ impl Server {
 
         // Client wants to begin data transmission using this device. Once
         // transmission completes, drop the lock on the export.
-        let mut file = devices.get(&export.name).await;
-        let result = conn.transmit(&mut file).await;
+        let result = {
+            let mut device = devices.get(&export.name)()?;
+            conn.transmit(&mut device).await
+        };
+        {
+            let mut locks = locks.lock().await;
+            locks.remove(&export.name);
+        }
 
-        let mut locks = locks.lock().await;
-        locks.remove(&export.name);
         result
     }
 }
