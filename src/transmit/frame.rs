@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use bytes::Buf;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -42,8 +43,7 @@ type Handle<'a> = &'a [u8];
 /// The header for each data transmission operation.
 #[derive(Debug)]
 pub(crate) struct Header<'a> {
-    // TODO(mdlayher): flags enum, start with Flush.
-    pub(crate) flags: u16,
+    pub(crate) flags: CommandFlags,
     pub(crate) handle: Handle<'a>,
     pub(crate) offset: u64,
     pub(crate) length: usize,
@@ -56,6 +56,13 @@ pub(crate) enum IoType {
     Disconnect = NBD_CMD_DISC,
     Read = NBD_CMD_READ,
     Write = NBD_CMD_WRITE,
+}
+
+bitflags! {
+    /// An I/O command flag present in a `Header`.
+    //
+    // TODO(mdlayher): we don't recognize any flags yet.
+    pub(crate) struct CommandFlags: u16 {}
 }
 
 impl<'a> Frame<'a> {
@@ -92,7 +99,7 @@ impl<'a> Frame<'a> {
             return Err(Error::TransmitProtocol(FrameType::Request));
         }
 
-        let flags = get_u16(src)?;
+        let flags = CommandFlags::from_bits(get_u16(src)?).unwrap_or_else(CommandFlags::empty);
         let io_type = get_u16(src)?;
 
         // Borrow opaque u64 Handle for use in reply, but do not decode it.

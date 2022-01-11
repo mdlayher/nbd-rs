@@ -105,7 +105,7 @@ where
             // No reply.
             Frame::Disconnect => Ok(None),
             Frame::ReadRequest(req) => {
-                if req.flags != 0 {
+                if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
                     return Ok(Some(Frame::ReadResponse(req.handle, Errno::Invalid, 0)));
                 }
@@ -118,7 +118,7 @@ where
                 Ok(Some(Frame::ReadResponse(req.handle, Errno::None, length)))
             }
             Frame::WriteRequest(req, buf) => {
-                if req.flags != 0 {
+                if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
                     return Ok(Some(Frame::WriteResponse(req.handle, Errno::Invalid)));
                 }
