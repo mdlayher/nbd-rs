@@ -29,9 +29,15 @@ pub(crate) enum Errno {
 /// are used to chunk up logical operations in this library.
 #[derive(Debug)]
 pub(crate) enum Frame<'a> {
+    // Control operations.
     Disconnect,
+
+    // Read operations.
     ReadRequest(Header<'a>),
     ReadResponse(Handle<'a>, Errno, usize),
+
+    // Write operations; WriteResponse is used for all requests.
+    FlushRequest(Handle<'a>),
     WriteRequest(Header<'a>, &'a [u8]),
     WriteResponse(Handle<'a>, Errno),
 }
@@ -54,6 +60,7 @@ pub(crate) struct Header<'a> {
 #[derive(Debug, FromPrimitive)]
 pub(crate) enum IoType {
     Disconnect = NBD_CMD_DISC,
+    Flush = NBD_CMD_FLUSH,
     Read = NBD_CMD_READ,
     Write = NBD_CMD_WRITE,
 }
@@ -86,7 +93,7 @@ impl<'a> Frame<'a> {
 
         match FromPrimitive::from_u16(io_type) {
             // Nothing to do.
-            Some(IoType::Disconnect) | Some(IoType::Read) => Ok(()),
+            Some(IoType::Disconnect) | Some(IoType::Flush) | Some(IoType::Read) => Ok(()),
             // Make sure we can consume a full write.
             Some(IoType::Write) => skip(src, length),
             None => Err(Error::TransmitProtocol(FrameType::Request)),
@@ -119,6 +126,13 @@ impl<'a> Frame<'a> {
 
         match FromPrimitive::from_u16(io_type) {
             Some(IoType::Disconnect) => Ok(Frame::Disconnect),
+            Some(IoType::Flush) => {
+                if offset != 0 || length != 0 {
+                    // TODO(mdlayher): return error.
+                }
+
+                Ok(Frame::FlushRequest(handle))
+            }
             Some(IoType::Read) => Ok(Frame::ReadRequest(header)),
             Some(IoType::Write) => {
                 // Write buffer lies beyond the end of the header, borrow it so
@@ -156,7 +170,10 @@ impl<'a> Frame<'a> {
                 Ok(Some(()))
             }
             // Cannot handle writing other I/O responses yet.
-            Self::Disconnect | Self::ReadRequest(..) | Self::WriteRequest(..) => todo!(),
+            Self::Disconnect
+            | Self::FlushRequest(..)
+            | Self::ReadRequest(..)
+            | Self::WriteRequest(..) => todo!(),
         }
     }
 }

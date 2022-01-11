@@ -97,6 +97,15 @@ bitflags! {
     pub(crate) struct TransmissionFlags: u16 {
         const HAS_FLAGS = NBD_FLAG_HAS_FLAGS;
         const READ_ONLY = NBD_FLAG_READ_ONLY;
+        const SEND_FLUSH = NBD_FLAG_SEND_FLUSH;
+    }
+}
+
+impl Default for TransmissionFlags {
+    /// Returns the default transmission flags this server supports for all
+    /// exports regardless of client configuration.
+    fn default() -> Self {
+        TransmissionFlags::HAS_FLAGS | TransmissionFlags::SEND_FLUSH
     }
 }
 
@@ -378,7 +387,7 @@ impl GoResponse {
                             dst.write_u64(export.size).await?;
 
                             // Always set flags, optionally mark read-only.
-                            let mut flags = TransmissionFlags::HAS_FLAGS;
+                            let mut flags = TransmissionFlags::default();
                             if export.readonly {
                                 flags |= TransmissionFlags::READ_ONLY;
                             }
@@ -1123,6 +1132,14 @@ mod valid_tests {
         }
     }
 
+    /// Returns a byte containing the low bits of all known TransmissionFlags.
+    fn transmission_flags_lo() -> u8 {
+        TransmissionFlags::all()
+            .bits()
+            .try_into()
+            .expect("transmission flags no longer fit into u8")
+    }
+
     macro_rules! frame_read_tests {
         ($($name:ident: $type:path: $value:expr,)*) => {
         $(
@@ -1404,7 +1421,7 @@ mod valid_tests {
                     // Size
                     0, 0, 0, 0, 16, 0, 0, 0,
                     // Transmission flags
-                    0, 1 | 2,
+                    0, transmission_flags_lo(),
                 ],
                 // Name
                 //
@@ -1499,7 +1516,7 @@ mod valid_tests {
                     // Size
                     0, 0, 0, 0, 16, 0, 0, 0,
                     // Transmission flags
-                    0, 1 | 2,
+                    0, transmission_flags_lo(),
                 ],
                 // Final acknowledgement
                 //
@@ -1789,7 +1806,7 @@ mod valid_tests {
                     // Size
                     0, 0, 0, 0, 16, 0, 0, 0,
                     // Transmission flags
-                    0, 1 | 2,
+                    0, transmission_flags_lo(),
                 ],
                 // Name
                 //
@@ -1873,7 +1890,7 @@ mod valid_tests {
                     // Size
                     0, 0, 0, 0, 16, 0, 0, 0,
                     // Transmission flags
-                    0, 1 | 2,
+                    0, transmission_flags_lo(),
                 ],
                 // Info acknowledgement
                 //

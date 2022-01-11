@@ -104,6 +104,10 @@ where
         match req {
             // No reply.
             Frame::Disconnect => Ok(None),
+            Frame::FlushRequest(handle) => {
+                device.flush()?;
+                Ok(Some(Frame::WriteResponse(handle, Errno::None)))
+            }
             Frame::ReadRequest(req) => {
                 if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
