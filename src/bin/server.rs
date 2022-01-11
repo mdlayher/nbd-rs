@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::OpenOptions;
 
 extern crate mdl_nbd;
 use mdl_nbd::{Devices, Export, Server};
@@ -19,11 +19,11 @@ async fn main() {
             description: "An NBD server written in Rust".to_string(),
             size: 4 * GiB,
             block_size: 4096,
-            readonly: true,
+            readonly: false,
         },
         Box::new(|| {
             // TODO(mdlayher): don't hard-code.
-            let f = File::open("disk.img")?;
+            let f = OpenOptions::new().read(true).write(true).open("disk.img")?;
             Ok(f)
         }),
     );

@@ -28,9 +28,11 @@ pub(crate) enum Errno {
 /// are used to chunk up logical operations in this library.
 #[derive(Debug)]
 pub(crate) enum Frame<'a> {
+    Disconnect,
     ReadRequest(Header<'a>),
     ReadResponse(Handle<'a>, Errno, usize),
-    Disconnect,
+    WriteRequest(Header<'a>, &'a [u8]),
+    WriteResponse(Handle<'a>, Errno),
 }
 
 /// An opaque value used by clients and server to denote matching requests and
@@ -40,7 +42,7 @@ type Handle<'a> = &'a [u8];
 /// The header for each data transmission operation.
 #[derive(Debug)]
 pub(crate) struct Header<'a> {
-    // TODO(mdlayher): flags enum.
+    // TODO(mdlayher): flags enum, start with Flush.
     pub(crate) flags: u16,
     pub(crate) handle: Handle<'a>,
     pub(crate) offset: u64,
@@ -53,29 +55,39 @@ pub(crate) struct Header<'a> {
 pub(crate) enum IoType {
     Disconnect = NBD_CMD_DISC,
     Read = NBD_CMD_READ,
+    Write = NBD_CMD_WRITE,
 }
 
 impl<'a> Frame<'a> {
     /// Determines if enough data is available to parse a `Frame`, then returns
     /// the length of that
-    pub(crate) fn check(src: &Cursor<&[u8]>) -> Result<()> {
-        // TODO(mdlayher): this abuses the fact that reads and disconnects
-        // contain a single header and no body data. This won't work for writes.
-        if src.remaining() < 28 {
-            Err(Error::Incomplete)
-        } else {
-            Ok(())
+    pub(crate) fn check(src: &'a mut Cursor<&[u8]>) -> Result<()> {
+        // Check for proper magic.
+        if get_u32(src)? != NBD_REQUEST_MAGIC {
+            return Err(Error::TransmitProtocol(FrameType::Request));
+        }
+
+        // Skip flags, check I/O type.
+        skip(src, 2)?;
+        let io_type = get_u16(src)?;
+
+        // Skip handle, offset.
+        skip(src, 16)?;
+
+        // Length is applicable only to writes.
+        let length = get_u32(src)? as usize;
+
+        match FromPrimitive::from_u16(io_type) {
+            // Nothing to do.
+            Some(IoType::Disconnect) | Some(IoType::Read) => Ok(()),
+            // Make sure we can consume a full write.
+            Some(IoType::Write) => skip(src, length),
+            None => Err(Error::TransmitProtocol(FrameType::Request)),
         }
     }
 
     /// Parses the next I/O operation `Frame` from `src`.
     pub(crate) fn parse(src: &'a mut Cursor<&[u8]>) -> Result<Frame<'a>> {
-        // Callers use src.position() after this call returns to determine where
-        // the next Frame begins. If early returns are added such as for
-        // Disconnect (since we don't care about offset, length, etc. in that
-        // case) then we have to update the cursor position as if we had read
-        // the entire header anyway.
-
         if get_u32(src)? != NBD_REQUEST_MAGIC {
             return Err(Error::TransmitProtocol(FrameType::Request));
         }
@@ -101,8 +113,15 @@ impl<'a> Frame<'a> {
         match FromPrimitive::from_u16(io_type) {
             Some(IoType::Disconnect) => Ok(Frame::Disconnect),
             Some(IoType::Read) => Ok(Frame::ReadRequest(header)),
-            // Cannot handle writes or other I/O requests yet.
-            _ => todo!(),
+            Some(IoType::Write) => {
+                // Write buffer lies beyond the end of the header, borrow it so
+                // we can write it to the device.
+                let pos = src.position() as usize;
+                let buf = &src.get_ref()[pos..pos + length];
+
+                Ok(Frame::WriteRequest(header, buf))
+            }
+            None => Err(Error::TransmitProtocol(FrameType::Request)),
         }
     }
 
@@ -122,8 +141,15 @@ impl<'a> Frame<'a> {
 
                 Ok(Some(()))
             }
+            Self::WriteResponse(handle, errno) => {
+                dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
+                dst.write_u32(errno as u32).await?;
+                dst.write_all(handle).await?;
+
+                Ok(Some(()))
+            }
             // Cannot handle writing other I/O responses yet.
-            Self::Disconnect | Self::ReadRequest(..) => todo!(),
+            Self::Disconnect | Self::ReadRequest(..) | Self::WriteRequest(..) => todo!(),
         }
     }
 }

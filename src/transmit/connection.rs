@@ -13,8 +13,7 @@ pub(crate) struct RawIoConnection<D, S> {
     stream: BufWriter<S>,
     stream_buffer: BytesMut,
 
-    // TODO(mdlayher): disallow write requests using this value, once writes are
-    // implemented.
+    // TODO(mdlayher): disallow write requests using this value.
     _readonly: bool,
 }
 
@@ -67,10 +66,13 @@ where
     /// incomplete error if we need to read more data from the stream.
     async fn next_io(&mut self) -> crate::Result<Option<()>> {
         let mut buf = Cursor::new(&self.stream_buffer[..]);
-        match Frame::check(&buf) {
+        match Frame::check(&mut buf) {
             Ok(_) => {
                 // Found a complete Frame, parse it, handle any associated I/O
                 // and client responses.
+                let len = buf.position() as usize;
+                buf.set_position(0);
+
                 let req = Frame::parse(&mut buf)?;
                 let res = Self::handle_io(&req, &mut self.device, &mut self.device_buffer)?;
                 if let Some(res) = res {
@@ -83,12 +85,7 @@ where
 
                 // Now advance the buffer beyond the current cursor for the next
                 // operation.
-                //
-                // TODO(mdlayher): think about this carefully when we start
-                // handling writes since those immediately follow the header.
-                let pos = buf.position() as usize;
-                self.stream_buffer.advance(pos);
-
+                self.stream_buffer.advance(len);
                 Ok(Some(()))
             }
             // Not enough data for an entire Frame.
@@ -120,8 +117,20 @@ where
                 // number of bytes we read.
                 Ok(Some(Frame::ReadResponse(req.handle, Errno::None, length)))
             }
+            Frame::WriteRequest(req, buf) => {
+                if req.flags != 0 {
+                    // TODO(mdlayher): support flags.
+                    return Ok(Some(Frame::WriteResponse(req.handle, Errno::Invalid)));
+                }
+
+                // TODO(mdlayher): flush operation.
+                device.seek(io::SeekFrom::Start(req.offset))?;
+                device.write_all(buf)?;
+
+                Ok(Some(Frame::WriteResponse(req.handle, Errno::None)))
+            }
             // Frames a client would handle.
-            Frame::ReadResponse(..) => todo!(),
+            Frame::ReadResponse(..) | Frame::WriteResponse(..) => todo!(),
         }
     }
 }
