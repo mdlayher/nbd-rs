@@ -51,30 +51,37 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         Ok(Self { conn })
     }
 
+    /// Performs a Go request to fetch `Export` metadata from the server and
+    /// initiate data transmission. If `name` is `None`, the server's default
+    /// export is fetched. If no export matching `name` could be found, `None`
+    /// is returned.
+    pub async fn go(&mut self, name: Option<&str>) -> crate::Result<Option<Export>> {
+        // TODO(mdlayher): return ClientIoConnection type or similar.
+        self.go_or_info(OptionRequest::Go(Self::go_request(name)))
+            .await
+    }
+
     /// Performs an Info request to fetch `Export` metadata from the server. If
     /// `name` is `None`, the server's default export is fetched. If no export
     /// matching `name` could be found, `None` is returned.
     pub async fn info(&mut self, name: Option<&str>) -> crate::Result<Option<Export>> {
-        // TODO(mdlayher): this feels awkward to get a String back from &str but
-        // the mini-redis example does roughly the same.
-        let name = name.map(|string| string.to_string());
+        self.go_or_info(OptionRequest::Info(Self::go_request(name)))
+            .await
+    }
 
-        let options = self
-            .options(OptionRequest::Info(GoRequest {
-                name,
-                info_requests: vec![
-                    InfoType::Export,
-                    InfoType::Name,
-                    InfoType::Description,
-                    InfoType::BlockSize,
-                ],
-            }))
-            .await?;
+    /// Performs an Info request to fetch `Export` metadata from the server. If
+    /// `name` is `None`, the server's default export is fetched. If no export
+    /// matching `name` could be found, `None` is returned.
+    async fn go_or_info(&mut self, option: OptionRequest) -> crate::Result<Option<Export>> {
+        let options = self.options(option).await?;
 
         match &options[..] {
-            [OptionResponse::Info(GoResponse::Ok { export, .. })] => Ok(Some(export.clone())),
+            // TODO(mdlayher): can these cases be simplified?
+            [OptionResponse::Go(GoResponse::Ok { export, .. })]
+            | [OptionResponse::Info(GoResponse::Ok { export, .. })] => Ok(Some(export.clone())),
             // TODO(mdlayher): display error strings? Add Error::NotFound?
-            [OptionResponse::Info(GoResponse::Unknown(_))] => Ok(None),
+            [OptionResponse::Go(GoResponse::Unknown(_))]
+            | [OptionResponse::Info(GoResponse::Unknown(_))] => Ok(None),
             _ => Err("server did not send an info response server option".into()),
         }
     }
@@ -109,5 +116,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         }
 
         Ok(server_options.known)
+    }
+
+    /// Produces a GoRequest with optional `name` value for a non-default
+    /// export.
+    fn go_request(name: Option<&str>) -> GoRequest {
+        // TODO(mdlayher): this feels awkward to get a String back from &str but
+        // the mini-redis example does roughly the same.
+        let name = name.map(|string| string.to_string());
+
+        GoRequest {
+            name,
+            info_requests: vec![
+                InfoType::Export,
+                InfoType::Name,
+                InfoType::Description,
+                InfoType::BlockSize,
+            ],
+        }
     }
 }
