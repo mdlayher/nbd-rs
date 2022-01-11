@@ -16,7 +16,7 @@ async fn info() {
         .await
         .expect("failed to listen");
 
-    let client = Client::<net::TcpStream>::connect(
+    let client = Client::connect(
         listener
             .local_addr()
             .expect("failed to get listener address"),
