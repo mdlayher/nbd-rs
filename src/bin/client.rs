@@ -1,11 +1,9 @@
-use tokio::net::TcpStream;
-
 extern crate mdl_nbd;
 use mdl_nbd::Client;
 
 #[tokio::main]
 async fn main() {
-    let mut client = Client::<TcpStream>::connect("[::1]:10809")
+    let mut client = Client::connect("[::1]:10809")
         .await
         .expect("failed to perform handshake");
 
