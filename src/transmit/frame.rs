@@ -89,9 +89,9 @@ pub(crate) enum IoType {
 
 bitflags! {
     /// An I/O command flag present in a `Header`.
-    //
-    // TODO(mdlayher): we don't recognize any flags yet.
-    pub(crate) struct CommandFlags: u16 {}
+    pub(crate) struct CommandFlags: u16 {
+        const FUA = NBD_CMD_FLAG_FUA;
+    }
 }
 
 impl<'a> Frame<'a> {

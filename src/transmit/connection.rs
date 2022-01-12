@@ -2,7 +2,7 @@ use bytes::{Buf, BytesMut};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
-use super::frame::{Errno, Frame};
+use super::frame::{CommandFlags, Errno, Frame, Header};
 use crate::frame::{Error, Result};
 
 /// An abstraction over the capabilities of a given device, such as whether the
@@ -35,12 +35,19 @@ where
         Ok(length)
     }
 
-    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
+    fn write_all_at(&mut self, req: &Header, buf: &[u8]) -> Result<()> {
         match self {
             Self::Read(..) => Err(Error::Unsupported),
             Self::ReadWrite(rw) => {
-                rw.seek(SeekFrom::Start(offset))?;
+                rw.seek(SeekFrom::Start(req.offset))?;
                 rw.write_all(buf)?;
+
+                if req.flags.contains(CommandFlags::FUA) {
+                    // Client wants us to flush the write buffer before replying
+                    // to its request.
+                    rw.flush()?;
+                }
+
                 Ok(())
             }
         }
@@ -61,8 +68,9 @@ where
             Frame::FlushRequest(req) => {
                 // Offset and length are reserved and must be zero.
                 //
-                // TODO(mdlayher): support flags.
-                if !req.flags.is_empty() || req.offset != 0 || req.length != 0 {
+                // Ignore flags for now. Some clients may set FUA or similar
+                // it is only valid for writes.
+                if req.offset != 0 || req.length != 0 {
                     return Some(Frame::ErrorResponse(Errno::Invalid));
                 }
 
@@ -70,10 +78,8 @@ where
                 Some(Frame::ErrorResponse(errno))
             }
             Frame::ReadRequest(req) => {
-                if !req.flags.is_empty() {
-                    // TODO(mdlayher): support flags.
-                    return Some(Frame::ErrorResponse(Errno::Invalid));
-                }
+                // Ignore flags for now. Some clients may set FUA or similar it
+                // is only valid for writes.
 
                 let res = match self.read_at(req.offset, &mut buf[..req.length]) {
                     Ok(length) => Frame::ReadResponse(length),
@@ -83,12 +89,7 @@ where
                 Some(res)
             }
             Frame::WriteRequest(req, buf) => {
-                if !req.flags.is_empty() {
-                    // TODO(mdlayher): support flags.
-                    return Some(Frame::ErrorResponse(Errno::Invalid));
-                }
-
-                let errno = self.write_all_at(req.offset, buf).into();
+                let errno = self.write_all_at(req, buf).into();
                 Some(Frame::ErrorResponse(errno))
             }
             // Frames a client would handle.

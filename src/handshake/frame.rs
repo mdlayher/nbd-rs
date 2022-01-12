@@ -98,6 +98,7 @@ bitflags! {
         const HAS_FLAGS  = NBD_FLAG_HAS_FLAGS;
         const READ_ONLY  = NBD_FLAG_READ_ONLY;
         const SEND_FLUSH = NBD_FLAG_SEND_FLUSH;
+        const SEND_FUA   = NBD_FLAG_SEND_FUA;
     }
 }
 
@@ -105,7 +106,7 @@ impl Default for TransmissionFlags {
     /// Returns the default transmission flags this server supports for all
     /// exports regardless of client configuration.
     fn default() -> Self {
-        TransmissionFlags::HAS_FLAGS | TransmissionFlags::SEND_FLUSH
+        TransmissionFlags::HAS_FLAGS | TransmissionFlags::SEND_FLUSH | TransmissionFlags::SEND_FUA
     }
 }
 

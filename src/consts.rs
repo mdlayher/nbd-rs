@@ -67,7 +67,7 @@ pub const NBD_CMD_TRIM: u16 = 4;
 pub const NBD_CMD_WRITE_ZEROES: u16 = 6;
 pub const NBD_CMD_RESIZE: u16 = 8;
 
-// Transmission flags.
+// Transmission negotiation flags.
 pub const NBD_FLAG_HAS_FLAGS: u16 = 1 << 0;
 pub const NBD_FLAG_READ_ONLY: u16 = 1 << 1;
 pub const NBD_FLAG_SEND_FLUSH: u16 = 1 << 2;
@@ -77,6 +77,9 @@ pub const NBD_FLAG_SEND_TRIM: u16 = 1 << 5;
 pub const NBD_FLAG_SEND_WRITE_ZEROES: u16 = 1 << 6;
 pub const NBD_FLAG_CAN_MULTI_CONN: u16 = 1 << 8;
 pub const NBD_FLAG_SEND_RESIZE: u16 = 1 << 9;
+
+// Transmission command flags.
+pub const NBD_CMD_FLAG_FUA: u16 = 1 << 0;
 
 // Transmission error numbers.
 pub const NBD_OK: u32 = 0;
