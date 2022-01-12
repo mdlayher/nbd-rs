@@ -53,15 +53,16 @@ pub(crate) enum Frame<'a> {
     // Control operations.
     Disconnect,
 
+    // A generic errno response message with no body.
+    ErrorResponse(Errno),
+
     // Read operations.
     ReadRequest(Header),
-    ReadErrorResponse(Errno),
-    ReadOkResponse(usize),
+    ReadResponse(usize),
 
     // Write operations; WriteResponse is used for all requests.
-    FlushRequest,
+    FlushRequest(Header),
     WriteRequest(Header, &'a [u8]),
-    WriteResponse(Errno),
 }
 
 /// An opaque value used by clients and server to denote matching requests and
@@ -146,13 +147,7 @@ impl<'a> Frame<'a> {
 
         let frame = match FromPrimitive::from_u16(io_type) {
             Some(IoType::Disconnect) => Frame::Disconnect,
-            Some(IoType::Flush) => {
-                if offset != 0 || length != 0 {
-                    // TODO(mdlayher): return error.
-                }
-
-                Frame::FlushRequest
-            }
+            Some(IoType::Flush) => Frame::FlushRequest(header),
             Some(IoType::Read) => Frame::ReadRequest(header),
             Some(IoType::Write) => {
                 // Write buffer lies beyond the end of the header, borrow it so
@@ -178,14 +173,16 @@ impl<'a> Frame<'a> {
         buf: &[u8],
     ) -> Result<Option<()>> {
         match self {
-            Self::ReadErrorResponse(errno) | Self::WriteResponse(errno) => {
+            Self::ErrorResponse(errno) => {
+                // Note that this reply may or may not actually indicate an
+                // error since Errno::None indicates an operation succeeded.
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
                 dst.write_u32(errno as u32).await?;
                 dst.write_all(handle).await?;
 
                 Ok(Some(()))
             }
-            Self::ReadOkResponse(length) => {
+            Self::ReadResponse(length) => {
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
                 dst.write_u32(NBD_OK).await?;
                 dst.write_all(handle).await?;
@@ -195,7 +192,7 @@ impl<'a> Frame<'a> {
             }
             // Cannot handle writing other I/O responses yet.
             Self::Disconnect
-            | Self::FlushRequest
+            | Self::FlushRequest(..)
             | Self::ReadRequest(..)
             | Self::WriteRequest(..) => todo!(),
         }

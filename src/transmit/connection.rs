@@ -58,19 +58,26 @@ where
         match req {
             // No reply.
             Frame::Disconnect => None,
-            Frame::FlushRequest => {
+            Frame::FlushRequest(req) => {
+                // Offset and length are reserved and must be zero.
+                //
+                // TODO(mdlayher): support flags.
+                if !req.flags.is_empty() || req.offset != 0 || req.length != 0 {
+                    return Some(Frame::ErrorResponse(Errno::Invalid));
+                }
+
                 let errno = self.flush().into();
-                Some(Frame::WriteResponse(errno))
+                Some(Frame::ErrorResponse(errno))
             }
             Frame::ReadRequest(req) => {
                 if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
-                    return Some(Frame::ReadErrorResponse(Errno::Invalid));
+                    return Some(Frame::ErrorResponse(Errno::Invalid));
                 }
 
                 let res = match self.read_at(req.offset, &mut buf[..req.length]) {
-                    Ok(length) => Frame::ReadOkResponse(length),
-                    Err(err) => Frame::ReadErrorResponse(err.into()),
+                    Ok(length) => Frame::ReadResponse(length),
+                    Err(err) => Frame::ErrorResponse(err.into()),
                 };
 
                 Some(res)
@@ -78,16 +85,14 @@ where
             Frame::WriteRequest(req, buf) => {
                 if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
-                    return Some(Frame::WriteResponse(Errno::Invalid));
+                    return Some(Frame::ErrorResponse(Errno::Invalid));
                 }
 
                 let errno = self.write_all_at(req.offset, buf).into();
-                Some(Frame::WriteResponse(errno))
+                Some(Frame::ErrorResponse(errno))
             }
             // Frames a client would handle.
-            Frame::ReadErrorResponse(..) | Frame::ReadOkResponse(..) | Frame::WriteResponse(..) => {
-                todo!()
-            }
+            Frame::ErrorResponse(..) | Frame::ReadResponse(..) => todo!(),
         }
     }
 }
