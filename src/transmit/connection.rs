@@ -173,7 +173,7 @@ where
                         // stream. The response frame is aware of how much data
                         // is valid in the device buffer and will slice
                         // accordingly.
-                        res.write(handle, &mut self.stream, &self.device_buffer)
+                        res.write(&mut self.stream, handle, &self.device_buffer)
                             .await?;
                         self.stream.flush().await?;
                     }

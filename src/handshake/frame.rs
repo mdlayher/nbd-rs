@@ -17,7 +17,49 @@ pub struct Export {
     pub description: String,
     pub size: u64,
     pub block_size: u32,
-    pub readonly: bool,
+    _flags: TransmissionFlags,
+}
+
+impl Export {
+    /// Creates a new read/write `Export` with the given name and device size.
+    /// `readonly` method to produce a read-only `Export`.
+    pub fn new(name: String, size: u64) -> Self {
+        Self {
+            name,
+            // TODO(mdlayher): probably make this Option<String> although that
+            // previously a nuisance, though I can't recall why.
+            description: "".to_string(),
+            size,
+            // TODO(mdlayher): don't hard-code.
+            block_size: 4096,
+
+            // Force the use of our default flags in this library to prevent
+            // weird misconfigurations.
+            _flags: TransmissionFlags::default(),
+        }
+    }
+
+    pub fn block_size(mut self, block_size: u32) -> Self {
+        self.block_size = block_size;
+        self
+    }
+
+    /// Sets a human-readable description for the `Export`.
+    pub fn description(mut self, description: String) -> Self {
+        self.description = description;
+        self
+    }
+
+    /// Marks this `Export` as read-only when negotiating data transmission.
+    pub fn readonly(mut self) -> Self {
+        self._flags.set(TransmissionFlags::READ_ONLY, true);
+        self
+    }
+
+    /// Returns the set of `TransmissionFlags` applied to this `Export`.
+    pub fn flags(&self) -> TransmissionFlags {
+        self._flags
+    }
 }
 
 /// One or more [`Export`]s which can be exposed via the NBD server handshake.
@@ -94,7 +136,7 @@ bitflags! {
     }
 
     /// Valid bitflags for data transmission negotiation.
-    pub(crate) struct TransmissionFlags: u16 {
+    pub struct TransmissionFlags: u16 {
         const HAS_FLAGS  = NBD_FLAG_HAS_FLAGS;
         const READ_ONLY  = NBD_FLAG_READ_ONLY;
         const SEND_FLUSH = NBD_FLAG_SEND_FLUSH;
@@ -383,16 +425,10 @@ impl GoResponse {
                             dst.write_u32(NBD_REP_INFO).await?;
                             dst.write_u32(2 + 8 + 2).await?;
 
-                            // Export info type, export size.
+                            // Export info type, export size, flags.
                             dst.write_u16(*info as u16).await?;
                             dst.write_u64(export.size).await?;
-
-                            // Always set flags, optionally mark read-only.
-                            let mut flags = TransmissionFlags::default();
-                            if export.readonly {
-                                flags |= TransmissionFlags::READ_ONLY;
-                            }
-                            dst.write_u16(flags.bits()).await?;
+                            dst.write_u16(export._flags.bits()).await?;
                         }
                         InfoType::Name => Self::write_string(dst, *info, &export.name).await?,
                         InfoType::Description => {
@@ -888,7 +924,7 @@ impl ParsedResponse {
                 OptionFragment::Go(GoFragment::Export(size, flags)) => {
                     info_requests.push(InfoType::Export);
                     export.size = size;
-                    export.readonly = flags.contains(TransmissionFlags::READ_ONLY);
+                    export._flags = flags;
                 }
                 OptionFragment::Go(GoFragment::Name(name)) => {
                     info_requests.push(InfoType::Name);
@@ -1121,13 +1157,9 @@ mod valid_tests {
 
     /// A synthetic export reused throughout all of the tests.
     fn test_export() -> Export {
-        Export {
-            name: "foo".to_string(),
-            description: "bar".to_string(),
-            size: 256 * MiB,
-            block_size: 512,
-            readonly: true,
-        }
+        Export::new("foo".to_string(), 256 * MiB)
+            .description("bar".to_string())
+            .readonly()
     }
 
     /// Returns a byte containing the low bits of all known TransmissionFlags.
@@ -1467,11 +1499,11 @@ mod valid_tests {
                     // Block size info type
                     0, 3,
                     // Minimum size
-                    0, 0, 2, 0,
+                    0, 0, 16, 0,
                     // Preferred size
-                    0, 0, 2, 0,
+                    0, 0, 16, 0,
                     // Maximum size
-                    0, 0, 2, 0,
+                    0, 0, 16, 0,
                 ],
                 // Final acknowledgement
                 //
@@ -1546,14 +1578,14 @@ mod valid_tests {
                     // NBD_REP_SERVER
                     0, 0, 0, 2,
                     // Length
-                    0, 0, 0, 43,
+                    0, 0, 0, 44,
                     // Name length
                     0, 0, 0, 3,
                     // Name
                     b'f', b'o', b'o',
                 ],
                 // Metadata
-                b"bar (size: 256MiB, block size: 512B)",
+                b"bar (size: 256MiB, block size: 4096B)",
                 // Final acknowledgement
                 //
                 // Magic
@@ -1757,15 +1789,15 @@ mod valid_tests {
                     }),
                     OptionResponse::Info(GoResponse::Ok {
                         info_requests: vec![InfoType::Export],
-                        export: Export{
-                            size: 256*MiB,
-                            readonly: true,
-                            ..Default::default()
-                        },
+                        // TODO(mdlayher): this is not a realistic export,
+                        // consider updating.
+                        export: Export::new("".to_string(), 256*MiB)
+                            .block_size(0)
+                            .readonly(),
                     }),
                     OptionResponse::List(ListResponse(vec![ListExport{
                         name: "foo".to_string(),
-                        metadata: "bar (size: 256MiB, block size: 512B)".to_string(),
+                        metadata: "bar (size: 256MiB, block size: 4096B)".to_string(),
                     }])),
                     OptionResponse::Go(GoResponse::Unknown("not found".to_string())),
                     OptionResponse::Info(GoResponse::Unknown("not found".to_string())),
@@ -1852,11 +1884,11 @@ mod valid_tests {
                     // Block size info type
                     0, 3,
                     // Minimum size
-                    0, 0, 2, 0,
+                    0, 0, 16, 0,
                     // Preferred size
-                    0, 0, 2, 0,
+                    0, 0, 16, 0,
                     // Maximum size
-                    0, 0, 2, 0,
+                    0, 0, 16, 0,
                 ],
                 // Go acknowledgement
                 //
@@ -1912,14 +1944,14 @@ mod valid_tests {
                     // NBD_REP_SERVER
                     0, 0, 0, 2,
                     // Length
-                    0, 0, 0, 43,
+                    0, 0, 0, 44,
                     // Name length
                     0, 0, 0, 3,
                     // Name
                     b'f', b'o', b'o',
                 ],
                 // Metadata
-                b"bar (size: 256MiB, block size: 512B)",
+                b"bar (size: 256MiB, block size: 4096B)",
                 // List acknowledgement
                 //
                 // Magic

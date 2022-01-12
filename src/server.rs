@@ -255,11 +255,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                     // Client requested Go and a valid export, prepare for
                     // I/O.
                     return Ok(Some((
-                        ServerIoConnection::new(
-                            self.conn.stream,
-                            self.conn.buffer,
-                            export.readonly,
-                        ),
+                        ServerIoConnection::new(self.conn.stream, self.conn.buffer, export.flags()),
                         export,
                     )));
                 }
@@ -277,17 +273,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
 pub struct ServerIoConnection<S> {
     stream: BufWriter<S>,
     buffer: BytesMut,
-    readonly: bool,
+    flags: TransmissionFlags,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
     /// Creates a connection ready for I/O by consuming the stream and buffer
     /// from the handshake phase.
-    pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, readonly: bool) -> Self {
+    pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, flags: TransmissionFlags) -> Self {
         Self {
             stream,
             buffer,
-            readonly,
+            flags,
         }
     }
 
@@ -297,7 +293,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
     pub async fn transmit<D: Read + Write + Seek>(self, device: D) -> crate::Result<()> {
         // Infer the capabilities of the device and pass the appropriate Device
         // variant.
-        let device = if self.readonly {
+        let device = if self.flags.contains(TransmissionFlags::READ_ONLY) {
             Device::Read(device)
         } else {
             Device::ReadWrite(device)

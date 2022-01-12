@@ -5,4 +5,4 @@ mod connection;
 pub(crate) use connection::{Device, RawIoConnection};
 
 mod frame;
-pub(crate) use frame::FrameType;
+pub(crate) use frame::{Frame, FrameType};

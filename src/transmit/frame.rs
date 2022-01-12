@@ -2,7 +2,7 @@ use bitflags::bitflags;
 use bytes::Buf;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use std::io::Cursor;
+use std::io::{self, Cursor};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::consts::*;
@@ -168,11 +168,23 @@ impl<'a> Frame<'a> {
     /// written to the stream or `None` if not.
     pub(crate) async fn write<S: AsyncWrite + Unpin>(
         self,
-        handle: Handle<'a>,
         dst: &mut S,
+        handle: Handle<'a>,
         buf: &[u8],
-    ) -> Result<Option<()>> {
+    ) -> io::Result<Option<()>> {
         match self {
+            Self::Disconnect => {
+                dst.write_u32(NBD_REQUEST_MAGIC).await?;
+                dst.write_u16(CommandFlags::empty().bits()).await?;
+                dst.write_u16(IoType::Disconnect as u16).await?;
+                dst.write_all(handle).await?;
+
+                // Offset and length must be zero.
+                dst.write_u64(0).await?;
+                dst.write_u32(0).await?;
+
+                Ok(Some(()))
+            }
             Self::ErrorResponse(errno) => {
                 // Note that this reply may or may not actually indicate an
                 // error since Errno::None indicates an operation succeeded.
@@ -191,10 +203,7 @@ impl<'a> Frame<'a> {
                 Ok(Some(()))
             }
             // Cannot handle writing other I/O responses yet.
-            Self::Disconnect
-            | Self::FlushRequest(..)
-            | Self::ReadRequest(..)
-            | Self::WriteRequest(..) => todo!(),
+            Self::FlushRequest(..) | Self::ReadRequest(..) | Self::WriteRequest(..) => todo!(),
         }
     }
 }

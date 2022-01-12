@@ -1,8 +1,12 @@
-use tokio::io::{AsyncRead, AsyncWrite};
+use bytes::BytesMut;
+use std::io;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
-use crate::handshake::frame::*;
+// TODO(mdlayher): try to avoid usage of *.
+use crate::handshake::frame::{Frame as HandshakeFrame, *};
 use crate::handshake::RawConnection;
+use crate::transmit::Frame as TransmitFrame;
 
 /// An NBD client connection which can query information and perform I/O
 /// transmission operations with a server export.
@@ -40,7 +44,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
             .await?
             .ok_or("server terminated connection while reading server handshake")?
         {
-            Frame::ServerHandshake(flags) => flags,
+            HandshakeFrame::ServerHandshake(flags) => flags,
             _ => return Err("server sent invalid server handshake".into()),
         };
 
@@ -55,10 +59,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
     /// initiate data transmission. If `name` is `None`, the server's default
     /// export is fetched. If no export matching `name` could be found, `None`
     /// is returned.
-    pub async fn go(&mut self, name: Option<&str>) -> crate::Result<Option<Export>> {
-        // TODO(mdlayher): return ClientIoConnection type or similar.
-        self.go_or_info(OptionRequest::Go(Self::go_request(name)))
-            .await
+    ///
+    /// If the server is ready for data transmission, `Some((ClientIoConnection,
+    /// Export))` will be returned.
+    pub async fn go(
+        mut self,
+        name: Option<&str>,
+    ) -> crate::Result<Option<(ClientIoConnection<S>, Export)>> {
+        let export = self
+            .go_or_info(OptionRequest::Go(Self::go_request(name)))
+            .await?;
+
+        let export = match export {
+            Some(export) => export,
+            // Unknown export, do nothing.
+            None => return Ok(None),
+        };
+
+        // Initiate data transmission with the server.
+        Ok(Some((
+            ClientIoConnection::new(self.conn.stream, self.conn.buffer, export.flags()),
+            export,
+        )))
     }
 
     /// Performs an Info request to fetch `Export` metadata from the server. If
@@ -90,7 +112,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
     /// raw `OptionResponse` values.
     async fn options(&mut self, option: OptionRequest) -> crate::Result<Vec<OptionResponse>> {
         self.conn
-            .write_frame(Frame::ClientOptions(ClientOptions {
+            .write_frame(HandshakeFrame::ClientOptions(ClientOptions {
                 flags: ClientFlags::FIXED_NEWSTYLE | ClientFlags::NO_ZEROES,
                 known: vec![option],
                 unknown: Vec::new(),
@@ -103,7 +125,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
             .await?
             .ok_or("server terminated connection while reading server options")?
         {
-            Frame::ServerOptions(options) => options,
+            HandshakeFrame::ServerOptions(options) => options,
             _ => return Err("server sent invalid server options".into()),
         };
 
@@ -133,6 +155,56 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                 InfoType::Description,
                 InfoType::BlockSize,
             ],
+        }
+    }
+}
+
+/// An NBD client connection which is ready to perform data transmission.
+/// This type is constructed by using the [`Client`]'s `go` method.
+pub struct ClientIoConnection<S> {
+    stream: BufWriter<S>,
+    _buffer: BytesMut,
+    _flags: TransmissionFlags,
+    handle: u64,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> ClientIoConnection<S> {
+    /// Creates a connection ready for I/O by consuming the stream and buffer
+    /// from the handshake phase.
+    pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, flags: TransmissionFlags) -> Self {
+        Self {
+            stream,
+            _buffer: buffer,
+            // TODO(mdlayher): pick apart and adjust capabilities such as for
+            // read-only exports.
+            _flags: flags,
+            handle: 0,
+        }
+    }
+
+    /// Initiates a client disconnect from the server and terminates the
+    /// connection.
+    pub async fn disconnect(mut self) -> crate::Result<()> {
+        self.write_frame(TransmitFrame::Disconnect).await?;
+        self.stream.shutdown().await?;
+        Ok(())
+    }
+
+    /// Writes a single `TransmitFrame` value to the server.
+    async fn write_frame(&mut self, frame: TransmitFrame<'_>) -> io::Result<()> {
+        // For every write, increment the handle counter.
+        //
+        // TODO(mdlayher): start with a random value.
+        self.handle += 1;
+        let handle = &self.handle.to_be_bytes()[..];
+
+        // TODO(mdlayher): read buffer.
+        let buf = &[];
+        if frame.write(&mut self.stream, handle, buf).await?.is_some() {
+            // Wrote a frame, flush it now.
+            self.stream.flush().await
+        } else {
+            Ok(())
         }
     }
 }
