@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::handshake::frame::*;
 use crate::handshake::RawConnection;
-use crate::transmit::RawIoConnection;
+use crate::transmit::{Device, RawIoConnection};
 
 /// An NBD server which can accept incoming TCP connections and serve one or
 /// more exported devices for client use.
@@ -295,7 +295,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
     /// I/O operations. This method blocks until the client disconnects or an
     /// unrecoverable error occurs.
     pub async fn transmit<D: Read + Write + Seek>(self, device: D) -> crate::Result<()> {
-        RawIoConnection::new(device, self.stream, self.buffer, self.readonly)
+        // Infer the capabilities of the device and pass the appropriate Device
+        // variant.
+        let device = if self.readonly {
+            Device::Read(device)
+        } else {
+            Device::ReadWrite(device)
+        };
+
+        RawIoConnection::new(device, self.stream, self.buffer)
             .serve()
             .await
     }

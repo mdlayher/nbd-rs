@@ -22,6 +22,18 @@ pub enum FrameType {
 pub(crate) enum Errno {
     None = NBD_OK,
     Invalid = NBD_EINVAL,
+    NotSupported = NBD_ENOTSUP,
+}
+
+impl<T> From<Result<T>> for Errno {
+    /// Converts `Result<T>` into the equivalent `Errno` value.
+    fn from(src: Result<T>) -> Self {
+        match src {
+            Ok(_) => Errno::None,
+            Err(Error::Unsupported) => Errno::NotSupported,
+            Err(_) => Errno::Invalid,
+        }
+    }
 }
 
 /// An NBD transmission data frame sent between client and server. Note that the
@@ -34,7 +46,8 @@ pub(crate) enum Frame<'a> {
 
     // Read operations.
     ReadRequest(Header<'a>),
-    ReadResponse(Handle<'a>, Errno, usize),
+    ReadErrorResponse(Handle<'a>, Errno),
+    ReadOkResponse(Handle<'a>, usize),
 
     // Write operations; WriteResponse is used for all requests.
     FlushRequest(Handle<'a>),
@@ -154,18 +167,18 @@ impl<'a> Frame<'a> {
         buf: &[u8],
     ) -> Result<Option<()>> {
         match self {
-            Self::ReadResponse(handle, errno, length) => {
+            Self::ReadErrorResponse(handle, errno) | Self::WriteResponse(handle, errno) => {
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
                 dst.write_u32(errno as u32).await?;
                 dst.write_all(handle).await?;
-                dst.write_all(&buf[..length]).await?;
 
                 Ok(Some(()))
             }
-            Self::WriteResponse(handle, errno) => {
+            Self::ReadOkResponse(handle, length) => {
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
-                dst.write_u32(errno as u32).await?;
+                dst.write_u32(NBD_OK).await?;
                 dst.write_all(handle).await?;
+                dst.write_all(&buf[..length]).await?;
 
                 Ok(Some(()))
             }

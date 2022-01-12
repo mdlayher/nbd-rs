@@ -13,6 +13,10 @@ pub enum Error {
     /// an entire Frame.
     Incomplete,
 
+    /// A sentinel which indicates a particular operation is unsupported for a
+    /// given type of device.
+    Unsupported,
+
     /// An error during the NBD protocol handshake.
     HandshakeProtocol(HandshakeFrameType),
 
@@ -96,6 +100,7 @@ impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Incomplete => "stream ended early".fmt(fmt),
+            Error::Unsupported => "device does not support this operation".fmt(fmt),
             Error::HandshakeProtocol(frame_type) => {
                 write!(fmt, "protocol error for handshake frame {:?}", frame_type)
             }

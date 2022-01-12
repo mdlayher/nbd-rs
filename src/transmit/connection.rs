@@ -1,34 +1,118 @@
 use bytes::{Buf, BytesMut};
-use std::io::{self, Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
 use super::frame::{Errno, Frame};
-use crate::frame::Error;
+use crate::frame::{Error, Result};
+
+/// An abstraction over the capabilities of a given device, such as whether the
+/// device is read-only or read/write.
+pub(crate) enum Device<R: Read + Seek, RW: Read + Write + Seek> {
+    Read(R),
+    ReadWrite(RW),
+}
+
+/// Wrappers for the variants of Device which may or may not be supported for a
+/// given concrete type.
+impl<R: Read + Seek, RW: Read + Write + Seek> Device<R, RW> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        let pos = SeekFrom::Start(offset);
+        let length = match self {
+            Self::Read(r) => {
+                r.seek(pos)?;
+                r.read(buf)?
+            }
+            Self::ReadWrite(rw) => {
+                rw.seek(pos)?;
+                rw.read(buf)?
+            }
+        };
+
+        Ok(length)
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
+        match self {
+            Self::Read(..) => Err(Error::Unsupported),
+            Self::ReadWrite(rw) => {
+                rw.seek(SeekFrom::Start(offset))?;
+                rw.write_all(buf)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        match self {
+            Self::ReadWrite(rw) => Ok(rw.flush()?),
+            Self::Read(..) => Err(Error::Unsupported),
+        }
+    }
+
+    /// Handles a single I/O operation `req` with the device buffer `buf`.
+    fn handle_io<'a>(&mut self, req: &'a Frame, buf: &mut [u8]) -> Option<Frame<'a>> {
+        match req {
+            // No reply.
+            Frame::Disconnect => None,
+            Frame::FlushRequest(handle) => {
+                let errno = self.flush().into();
+                Some(Frame::WriteResponse(handle, errno))
+            }
+            Frame::ReadRequest(req) => {
+                if !req.flags.is_empty() {
+                    // TODO(mdlayher): support flags.
+                    return Some(Frame::ReadErrorResponse(req.handle, Errno::Invalid));
+                }
+
+                let res = match self.read_at(req.offset, &mut buf[..req.length]) {
+                    Ok(length) => Frame::ReadOkResponse(req.handle, length),
+                    res => Frame::ReadErrorResponse(req.handle, res.into()),
+                };
+
+                Some(res)
+            }
+            Frame::WriteRequest(req, buf) => {
+                if !req.flags.is_empty() {
+                    // TODO(mdlayher): support flags.
+                    return Some(Frame::WriteResponse(req.handle, Errno::Invalid));
+                }
+
+                let errno = self.write_all_at(req.offset, buf).into();
+                Some(Frame::WriteResponse(req.handle, errno))
+            }
+            // Frames a client would handle.
+            Frame::ReadErrorResponse(..) | Frame::ReadOkResponse(..) | Frame::WriteResponse(..) => {
+                todo!()
+            }
+        }
+    }
+}
 
 /// A low level NBD connection type which handles data transmission operations
 /// between a client stream and an exported device.
-pub(crate) struct RawIoConnection<D, S> {
-    device: D,
+pub(crate) struct RawIoConnection<R, RW, S>
+where
+    R: Read + Seek,
+    RW: Read + Write + Seek,
+{
+    device: Device<R, RW>,
     device_buffer: Vec<u8>,
     stream: BufWriter<S>,
     stream_buffer: BytesMut,
-
-    // TODO(mdlayher): disallow write requests using this value.
-    _readonly: bool,
 }
 
-impl<D, S> RawIoConnection<D, S>
+impl<R, RW, S> RawIoConnection<R, RW, S>
 where
-    D: Read + Write + Seek,
+    R: Read + Seek,
+    RW: Read + Write + Seek,
     S: AsyncRead + AsyncWrite + Unpin,
 {
     /// Consumes the fields of a `ServerIoConnection` and allocates buffers to
     /// begin handling I/O for `device`.
     pub(crate) fn new(
-        device: D,
+        device: Device<R, RW>,
         stream: BufWriter<S>,
         stream_buffer: BytesMut,
-        readonly: bool,
     ) -> Self {
         Self {
             device,
@@ -36,7 +120,6 @@ where
             device_buffer: vec![0u8; 256 * 1024],
             stream,
             stream_buffer,
-            _readonly: readonly,
         }
     }
 
@@ -74,8 +157,7 @@ where
                 buf.set_position(0);
 
                 let req = Frame::parse(&mut buf)?;
-                let res = Self::handle_io(&req, &mut self.device, &mut self.device_buffer)?;
-                if let Some(res) = res {
+                if let Some(res) = self.device.handle_io(&req, &mut self.device_buffer) {
                     // We have something to write, send it now and flush the
                     // stream. The response frame is aware of how much data is
                     // valid in the device buffer and will slice accordingly.
@@ -92,49 +174,6 @@ where
             Err(Error::Incomplete) => Ok(None),
             // Failed to parse.
             Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Handles a single I/O operation `req` using `device` and its buffer.
-    fn handle_io<'a>(
-        req: &'a Frame,
-        device: &mut D,
-        device_buffer: &mut [u8],
-    ) -> crate::Result<Option<Frame<'a>>> {
-        match req {
-            // No reply.
-            Frame::Disconnect => Ok(None),
-            Frame::FlushRequest(handle) => {
-                device.flush()?;
-                Ok(Some(Frame::WriteResponse(handle, Errno::None)))
-            }
-            Frame::ReadRequest(req) => {
-                if !req.flags.is_empty() {
-                    // TODO(mdlayher): support flags.
-                    return Ok(Some(Frame::ReadResponse(req.handle, Errno::Invalid, 0)));
-                }
-
-                device.seek(io::SeekFrom::Start(req.offset))?;
-                let length = device.read(&mut device_buffer[..req.length])?;
-
-                // Regardless of what the client requested, return the actual
-                // number of bytes we read.
-                Ok(Some(Frame::ReadResponse(req.handle, Errno::None, length)))
-            }
-            Frame::WriteRequest(req, buf) => {
-                if !req.flags.is_empty() {
-                    // TODO(mdlayher): support flags.
-                    return Ok(Some(Frame::WriteResponse(req.handle, Errno::Invalid)));
-                }
-
-                // TODO(mdlayher): flush operation.
-                device.seek(io::SeekFrom::Start(req.offset))?;
-                device.write_all(buf)?;
-
-                Ok(Some(Frame::WriteResponse(req.handle, Errno::None)))
-            }
-            // Frames a client would handle.
-            Frame::ReadResponse(..) | Frame::WriteResponse(..) => todo!(),
         }
     }
 }

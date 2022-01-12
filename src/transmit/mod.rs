@@ -2,7 +2,7 @@
 //! (NBD) protocol.
 
 mod connection;
-pub(crate) use connection::RawIoConnection;
+pub(crate) use connection::{Device, RawIoConnection};
 
 mod frame;
 pub(crate) use frame::FrameType;
