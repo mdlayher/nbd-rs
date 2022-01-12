@@ -30,8 +30,17 @@ impl<T> From<Result<T>> for Errno {
     fn from(src: Result<T>) -> Self {
         match src {
             Ok(_) => Errno::None,
-            Err(Error::Unsupported) => Errno::NotSupported,
-            Err(_) => Errno::Invalid,
+            Err(err) => err.into(),
+        }
+    }
+}
+
+impl From<Error> for Errno {
+    /// Converts `Error` into the equivalent `Errno` value.
+    fn from(src: Error) -> Self {
+        match src {
+            Error::Unsupported => Errno::NotSupported,
+            _ => Errno::Invalid,
         }
     }
 }
@@ -45,14 +54,14 @@ pub(crate) enum Frame<'a> {
     Disconnect,
 
     // Read operations.
-    ReadRequest(Header<'a>),
-    ReadErrorResponse(Handle<'a>, Errno),
-    ReadOkResponse(Handle<'a>, usize),
+    ReadRequest(Header),
+    ReadErrorResponse(Errno),
+    ReadOkResponse(usize),
 
     // Write operations; WriteResponse is used for all requests.
-    FlushRequest(Handle<'a>),
-    WriteRequest(Header<'a>, &'a [u8]),
-    WriteResponse(Handle<'a>, Errno),
+    FlushRequest,
+    WriteRequest(Header, &'a [u8]),
+    WriteResponse(Errno),
 }
 
 /// An opaque value used by clients and server to denote matching requests and
@@ -61,9 +70,8 @@ type Handle<'a> = &'a [u8];
 
 /// The header for each data transmission operation.
 #[derive(Debug)]
-pub(crate) struct Header<'a> {
+pub(crate) struct Header {
     pub(crate) flags: CommandFlags,
-    pub(crate) handle: Handle<'a>,
     pub(crate) offset: u64,
     pub(crate) length: usize,
 }
@@ -114,7 +122,7 @@ impl<'a> Frame<'a> {
     }
 
     /// Parses the next I/O operation `Frame` from `src`.
-    pub(crate) fn parse(src: &'a mut Cursor<&[u8]>) -> Result<Frame<'a>> {
+    pub(crate) fn parse(src: &'a mut Cursor<&[u8]>) -> Result<(Frame<'a>, Handle<'a>)> {
         if get_u32(src)? != NBD_REQUEST_MAGIC {
             return Err(Error::TransmitProtocol(FrameType::Request));
         }
@@ -132,49 +140,52 @@ impl<'a> Frame<'a> {
 
         let header = Header {
             flags,
-            handle,
             offset,
             length,
         };
 
-        match FromPrimitive::from_u16(io_type) {
-            Some(IoType::Disconnect) => Ok(Frame::Disconnect),
+        let frame = match FromPrimitive::from_u16(io_type) {
+            Some(IoType::Disconnect) => Frame::Disconnect,
             Some(IoType::Flush) => {
                 if offset != 0 || length != 0 {
                     // TODO(mdlayher): return error.
                 }
 
-                Ok(Frame::FlushRequest(handle))
+                Frame::FlushRequest
             }
-            Some(IoType::Read) => Ok(Frame::ReadRequest(header)),
+            Some(IoType::Read) => Frame::ReadRequest(header),
             Some(IoType::Write) => {
                 // Write buffer lies beyond the end of the header, borrow it so
                 // we can write it to the device.
                 let pos = src.position() as usize;
                 let buf = &src.get_ref()[pos..pos + length];
 
-                Ok(Frame::WriteRequest(header, buf))
+                Frame::WriteRequest(header, buf)
             }
-            None => Err(Error::TransmitProtocol(FrameType::Request)),
-        }
+            None => return Err(Error::TransmitProtocol(FrameType::Request)),
+        };
+
+        Ok((frame, handle))
     }
 
-    /// Writes the current `Frame` out to `dst`. It returns `Some(())` if any
-    /// bytes were written to the stream or `None` if not.
+    /// Writes the current `Frame` out to `dst` as a response to the I/O
+    /// operation requested by `handle`. It returns `Some(())` if any bytes were
+    /// written to the stream or `None` if not.
     pub(crate) async fn write<S: AsyncWrite + Unpin>(
         self,
+        handle: Handle<'a>,
         dst: &mut S,
         buf: &[u8],
     ) -> Result<Option<()>> {
         match self {
-            Self::ReadErrorResponse(handle, errno) | Self::WriteResponse(handle, errno) => {
+            Self::ReadErrorResponse(errno) | Self::WriteResponse(errno) => {
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
                 dst.write_u32(errno as u32).await?;
                 dst.write_all(handle).await?;
 
                 Ok(Some(()))
             }
-            Self::ReadOkResponse(handle, length) => {
+            Self::ReadOkResponse(length) => {
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
                 dst.write_u32(NBD_OK).await?;
                 dst.write_all(handle).await?;
@@ -184,7 +195,7 @@ impl<'a> Frame<'a> {
             }
             // Cannot handle writing other I/O responses yet.
             Self::Disconnect
-            | Self::FlushRequest(..)
+            | Self::FlushRequest
             | Self::ReadRequest(..)
             | Self::WriteRequest(..) => todo!(),
         }

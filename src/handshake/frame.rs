@@ -4,7 +4,7 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::cmp::max;
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, Cursor, Write};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::consts::*;
@@ -95,8 +95,8 @@ bitflags! {
 
     /// Valid bitflags for data transmission negotiation.
     pub(crate) struct TransmissionFlags: u16 {
-        const HAS_FLAGS = NBD_FLAG_HAS_FLAGS;
-        const READ_ONLY = NBD_FLAG_READ_ONLY;
+        const HAS_FLAGS  = NBD_FLAG_HAS_FLAGS;
+        const READ_ONLY  = NBD_FLAG_READ_ONLY;
         const SEND_FLUSH = NBD_FLAG_SEND_FLUSH;
     }
 }
@@ -175,7 +175,7 @@ impl OptionRequest {
     /// been consumed by `next_option` with the given `frame_type`. This can
     /// then be associated with `OptionRequest::Go` or `OptionRequest::Info` as
     /// necessary.
-    fn go(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<GoRequest> {
+    fn go(src: &mut Cursor<&[u8]>, frame_type: FrameType) -> Result<GoRequest> {
         // Name may or may not be present.
         let name_length = get_u32(src)? as usize;
         let name = match name_length {
@@ -517,7 +517,7 @@ impl ListResponse {
 impl Frame {
     /// Determines if enough data is available to parse a `Frame` of the given
     /// `FrameType` from `src`.
-    pub(crate) fn check(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
+    pub(crate) fn check(src: &mut Cursor<&[u8]>, frame_type: FrameType) -> Result<()> {
         match frame_type {
             FrameType::ClientOptions => {
                 // flags u32
@@ -568,7 +568,7 @@ impl Frame {
     }
 
     /// Parses the next `Frame` according to the given `FrameType`.
-    pub(crate) fn parse(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
+    pub(crate) fn parse(src: &mut Cursor<&[u8]>, frame_type: FrameType) -> Result<Frame> {
         match frame_type {
             FrameType::ClientOptions => {
                 let flags = ClientFlags::from_bits(get_u32(src)?)
@@ -781,7 +781,7 @@ enum ParsedRequest {
 
 /// Produces the next `ParseRequest` value from `src` by consuming the client
 /// option header and inner data for a given `frame_type`.
-fn next_client_option(src: &mut io::Cursor<&[u8]>, frame_type: FrameType) -> Result<ParsedRequest> {
+fn next_client_option(src: &mut Cursor<&[u8]>, frame_type: FrameType) -> Result<ParsedRequest> {
     if get_u64(src)? != IHAVEOPT {
         return Err(Error::HandshakeProtocol(frame_type));
     }
@@ -815,10 +815,7 @@ enum ParsedResponse {
 
 /// Produces the next `ParseResponse` value from `src` by consuming the server
 /// option header and inner data for a given `frame_type`.
-fn next_server_option(
-    src: &mut io::Cursor<&[u8]>,
-    frame_type: FrameType,
-) -> Result<ParsedResponse> {
+fn next_server_option(src: &mut Cursor<&[u8]>, frame_type: FrameType) -> Result<ParsedResponse> {
     // Options are fragmented into smaller messages than the Frame API we
     // present. Parse the fragments and then assemble them after we are done.
     let mut fragments = Vec::new();
@@ -925,7 +922,7 @@ impl ParsedResponse {
 
 /// Parses OptionFragment values from a cursor until no more remain.
 struct OptionFragmentParser<'a, 'b> {
-    src: &'a mut io::Cursor<&'b [u8]>,
+    src: &'a mut Cursor<&'b [u8]>,
     frame_type: FrameType,
 
     done: bool,
@@ -956,7 +953,7 @@ enum GoFragment {
 
 impl<'a, 'b> OptionFragmentParser<'a, 'b> {
     /// Creates a new `OptionFragmentParser` ready for use.
-    fn new(src: &'a mut io::Cursor<&'b [u8]>, frame_type: FrameType) -> Self {
+    fn new(src: &'a mut Cursor<&'b [u8]>, frame_type: FrameType) -> Self {
         Self {
             src,
             frame_type,
@@ -1146,7 +1143,7 @@ mod valid_tests {
             #[test]
             fn $name() {
                 let (buf, frame_type, want) = $value;
-                let mut src = io::Cursor::new(&buf[..]);
+                let mut src = Cursor::new(&buf[..]);
 
                 Frame::check(&mut src, frame_type).expect("failed to check frame");
                 src.set_position(0);
@@ -1589,7 +1586,7 @@ mod valid_tests {
                     frame,
                 );
 
-                let mut src = io::Cursor::new(&buf[..]);
+                let mut src = Cursor::new(&buf[..]);
 
                 let frame_type = frame.to_type();
                 Frame::check(&mut src, frame_type).expect("failed to check frame");
@@ -2027,7 +2024,7 @@ mod invalid_tests {
             #[test]
             fn $name() {
                 let (frame_type, buf) = $value;
-                let mut src = io::Cursor::new(&buf[..]);
+                let mut src = Cursor::new(&buf[..]);
 
                 let err = Frame::check(&mut src, frame_type).expect_err("frame check succeeded");
 
@@ -2047,7 +2044,7 @@ mod invalid_tests {
             #[test]
             fn $name() {
                 let (frame_type, buf) = $value;
-                let mut src = io::Cursor::new(&buf[..]);
+                let mut src = Cursor::new(&buf[..]);
 
                 let err = Frame::parse(&mut src, frame_type).expect_err("frame parse succeeded");
 

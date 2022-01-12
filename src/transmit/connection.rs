@@ -14,7 +14,11 @@ pub(crate) enum Device<R: Read + Seek, RW: Read + Write + Seek> {
 
 /// Wrappers for the variants of Device which may or may not be supported for a
 /// given concrete type.
-impl<R: Read + Seek, RW: Read + Write + Seek> Device<R, RW> {
+impl<R, RW> Device<R, RW>
+where
+    R: Read + Seek,
+    RW: Read + Write + Seek,
+{
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let pos = SeekFrom::Start(offset);
         let length = match self {
@@ -54,19 +58,19 @@ impl<R: Read + Seek, RW: Read + Write + Seek> Device<R, RW> {
         match req {
             // No reply.
             Frame::Disconnect => None,
-            Frame::FlushRequest(handle) => {
+            Frame::FlushRequest => {
                 let errno = self.flush().into();
-                Some(Frame::WriteResponse(handle, errno))
+                Some(Frame::WriteResponse(errno))
             }
             Frame::ReadRequest(req) => {
                 if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
-                    return Some(Frame::ReadErrorResponse(req.handle, Errno::Invalid));
+                    return Some(Frame::ReadErrorResponse(Errno::Invalid));
                 }
 
                 let res = match self.read_at(req.offset, &mut buf[..req.length]) {
-                    Ok(length) => Frame::ReadOkResponse(req.handle, length),
-                    res => Frame::ReadErrorResponse(req.handle, res.into()),
+                    Ok(length) => Frame::ReadOkResponse(length),
+                    Err(err) => Frame::ReadErrorResponse(err.into()),
                 };
 
                 Some(res)
@@ -74,11 +78,11 @@ impl<R: Read + Seek, RW: Read + Write + Seek> Device<R, RW> {
             Frame::WriteRequest(req, buf) => {
                 if !req.flags.is_empty() {
                     // TODO(mdlayher): support flags.
-                    return Some(Frame::WriteResponse(req.handle, Errno::Invalid));
+                    return Some(Frame::WriteResponse(Errno::Invalid));
                 }
 
                 let errno = self.write_all_at(req.offset, buf).into();
-                Some(Frame::WriteResponse(req.handle, errno))
+                Some(Frame::WriteResponse(errno))
             }
             // Frames a client would handle.
             Frame::ReadErrorResponse(..) | Frame::ReadOkResponse(..) | Frame::WriteResponse(..) => {
@@ -156,13 +160,17 @@ where
                 let len = buf.position() as usize;
                 buf.set_position(0);
 
-                let req = Frame::parse(&mut buf)?;
-                if let Some(res) = self.device.handle_io(&req, &mut self.device_buffer) {
-                    // We have something to write, send it now and flush the
-                    // stream. The response frame is aware of how much data is
-                    // valid in the device buffer and will slice accordingly.
-                    res.write(&mut self.stream, &self.device_buffer).await?;
-                    self.stream.flush().await?;
+                {
+                    let (req, handle) = Frame::parse(&mut buf)?;
+                    if let Some(res) = self.device.handle_io(&req, &mut self.device_buffer) {
+                        // We have something to write, send it now and flush the
+                        // stream. The response frame is aware of how much data
+                        // is valid in the device buffer and will slice
+                        // accordingly.
+                        res.write(handle, &mut self.stream, &self.device_buffer)
+                            .await?;
+                        self.stream.flush().await?;
+                    }
                 }
 
                 // Now advance the buffer beyond the current cursor for the next
