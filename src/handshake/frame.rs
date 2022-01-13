@@ -66,6 +66,14 @@ impl Export {
         self
     }
 
+    /// Marks this `Export` as being backed by rotational media, such as a
+    /// conventional hard drive. This can be used as a hint for clients to
+    /// optimize their access patterns.
+    pub fn rotational(mut self) -> Self {
+        self._flags.set(TransmissionFlags::ROTATIONAL, true);
+        self
+    }
+
     /// Returns the set of `TransmissionFlags` applied to this `Export`.
     pub fn flags(&self) -> TransmissionFlags {
         self._flags
@@ -188,6 +196,7 @@ bitflags! {
         const READ_ONLY  = NBD_FLAG_READ_ONLY;
         const SEND_FLUSH = NBD_FLAG_SEND_FLUSH;
         const SEND_FUA   = NBD_FLAG_SEND_FUA;
+        const ROTATIONAL = NBD_FLAG_ROTATIONAL;
     }
 }
 
@@ -1213,9 +1222,11 @@ mod valid_tests {
         Export::new("foo", 256 * MiB).description("bar").readonly()
     }
 
-    /// Returns a byte containing the low bits of all known TransmissionFlags.
+    /// Returns a byte containing the low bits of the test export's
+    /// TransmissionFlags.
     fn transmission_flags_lo() -> u8 {
-        TransmissionFlags::all()
+        // Defaults + read-only, don't bother setting every new flag.
+        (TransmissionFlags::default() | TransmissionFlags::READ_ONLY)
             .bits()
             .try_into()
             .expect("transmission flags no longer fit into u8")
