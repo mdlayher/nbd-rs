@@ -42,9 +42,9 @@ impl<D: Read + Write + Seek> Devices<D> {
 
     /// Adds an additional named export and `open` device handle function. The
     /// export can be queried by name.
-    pub fn add(mut self, export: Export, open: DeviceFn<D>) -> Self {
+    pub fn export(mut self, export: Export, open: DeviceFn<D>) -> Self {
         let name = export.name.clone();
-        self.exports.add(export);
+        self.exports = self.exports.export(export);
         self.devices.insert(name, open);
         self
     }

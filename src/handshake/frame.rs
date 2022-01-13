@@ -84,7 +84,7 @@ impl Exports {
     }
 
     /// Adds an additional non-default `Export` which may be queried by name.
-    pub fn add(&mut self, export: Export) -> &mut Self {
+    pub fn export(mut self, export: Export) -> Self {
         self.exports.push(export);
         self
     }
