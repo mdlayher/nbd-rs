@@ -162,7 +162,7 @@ impl Server {
         let (conn, export) = {
             let mut locks = locks.lock().await;
 
-            let (conn, export) = match conn.handshake(&devices, &locks).await? {
+            let (conn, export) = match conn.handshake(devices, &locks).await? {
                 Some(conn) => conn,
                 // Client didn't wish to initiate data transmission, do nothing.
                 None => return Ok(()),
@@ -211,7 +211,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     }
 
     /// Initiates the NBD server handshake with a client by exposing the
-    /// metadata from `exports`. It is possible for a client to query the server
+    /// metadata from `devices`. It is possible for a client to query the server
     /// for options multiple times before initiating data transmission.
     ///
     /// If the client reads data from the server and disconnects without
@@ -224,7 +224,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     /// client's chosen export.
     pub async fn handshake<D: Read + Write + Seek>(
         mut self,
-        exports: &Devices<D>,
+        devices: &Devices<D>,
         locks: &HashSet<String>,
     ) -> crate::Result<Option<(ServerIoConnection<S>, Export)>> {
         // Send opening handshake, then negotiate options with client.
@@ -265,7 +265,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
             let response: Vec<OptionResponse> = client_options
                 .known
                 .into_iter()
-                .map(|request| OptionResponse::from_request(request, &exports.exports, locks))
+                .map(|request| OptionResponse::from_request(request, &devices.exports, locks))
                 .collect();
 
             debug!("server: {:?}", response);
