@@ -14,7 +14,7 @@ use crate::frame::*;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Export {
     pub name: String,
-    pub description: String,
+    pub description: Option<String>,
     pub size: u64,
     pub block_size: u32,
     _flags: TransmissionFlags,
@@ -26,9 +26,7 @@ impl Export {
     pub fn new(name: String, size: u64) -> Self {
         Self {
             name,
-            // TODO(mdlayher): probably make this Option<String> although that
-            // previously a nuisance, though I can't recall why.
-            description: "".to_string(),
+            description: None,
             size,
             // TODO(mdlayher): don't hard-code.
             block_size: 4096,
@@ -46,7 +44,7 @@ impl Export {
 
     /// Sets a human-readable description for the `Export`.
     pub fn description(mut self, description: String) -> Self {
-        self.description = description;
+        self.description = Some(description);
         self
     }
 
@@ -432,7 +430,14 @@ impl GoResponse {
                         }
                         InfoType::Name => Self::write_string(dst, *info, &export.name).await?,
                         InfoType::Description => {
-                            Self::write_string(dst, *info, &export.description).await?
+                            // Write an empty description anyway rather than
+                            // dealing with error logic.
+                            let string = match &export.description {
+                                Some(s) => s,
+                                None => "",
+                            };
+
+                            Self::write_string(dst, *info, string).await?
                         }
                         InfoType::BlockSize => {
                             // Fixed size of 14 bytes for block size.
@@ -503,9 +508,22 @@ impl From<Export> for ListExport {
     /// Converts an `Export` into a `ListExport` by packing fields in a
     /// structured way into metadata.
     fn from(src: Export) -> ListExport {
+        // Apply prefix data for better metadata listing.
+        let description = match src.description {
+            Some(s) => format!("{} ", s),
+            None => "".to_string(),
+        };
+
+        let readonly = if src._flags.contains(TransmissionFlags::READ_ONLY) {
+            "[read-only] "
+        } else {
+            ""
+        };
+
         let metadata = format!(
-            "{} (size: {}MiB, block size: {}B)",
-            src.description,
+            "{}{}(size: {}MiB, block size: {}B)",
+            description,
+            readonly,
             // TODO(mdlayher): this bytes to MiB calculation is good enough
             // for now but probably not very robust.
             src.size / MiB,
@@ -984,7 +1002,7 @@ enum OptionFragment {
 enum GoFragment {
     Export(u64, TransmissionFlags),
     Name(String),
-    Description(String),
+    Description(Option<String>),
     BlockSize(u32, u32, u32),
 }
 
@@ -1122,9 +1140,16 @@ impl<'a, 'b> OptionFragmentParser<'a, 'b> {
                     InfoType::Name => Ok(OptionFragment::Go(GoFragment::Name(
                         self.read_string(length - 2)?,
                     ))),
-                    InfoType::Description => Ok(OptionFragment::Go(GoFragment::Description(
-                        self.read_string(length - 2)?,
-                    ))),
+                    InfoType::Description => {
+                        // Return None in place of empty string.
+                        let string = self.read_string(length - 2)?;
+                        let string = match string.len() {
+                            0 => None,
+                            _ => Some(string),
+                        };
+
+                        Ok(OptionFragment::Go(GoFragment::Description(string)))
+                    }
                     InfoType::BlockSize => {
                         // Fixed length.
                         if length != 14 {
@@ -1578,14 +1603,14 @@ mod valid_tests {
                     // NBD_REP_SERVER
                     0, 0, 0, 2,
                     // Length
-                    0, 0, 0, 44,
+                    0, 0, 0, 56,
                     // Name length
                     0, 0, 0, 3,
                     // Name
                     b'f', b'o', b'o',
                 ],
                 // Metadata
-                b"bar (size: 256MiB, block size: 4096B)",
+                b"bar [read-only] (size: 256MiB, block size: 4096B)",
                 // Final acknowledgement
                 //
                 // Magic
