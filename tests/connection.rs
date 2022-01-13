@@ -24,9 +24,7 @@ async fn info() {
     );
 
     let exports = Arc::new(Exports::new(
-        Export::new("foo".to_string(), 256 * MiB)
-            .description("bar".to_string())
-            .readonly(),
+        Export::new("foo", 256 * MiB).description("bar").readonly(),
     ));
 
     let server_exports = exports.clone();
@@ -79,7 +77,7 @@ async fn go() {
             .expect("failed to get listener address"),
     );
 
-    let exports = Arc::new(Exports::new(Export::new("foo".to_string(), MiB).readonly()));
+    let exports = Arc::new(Exports::new(Export::new("foo", MiB).readonly()));
 
     let server_exports = exports.clone();
     let server_handle = tokio::spawn(async move {

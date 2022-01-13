@@ -23,9 +23,9 @@ pub struct Export {
 impl Export {
     /// Creates a new read/write `Export` with the given name and device size.
     /// `readonly` method to produce a read-only `Export`.
-    pub fn new(name: String, size: u64) -> Self {
+    pub fn new(name: &str, size: u64) -> Self {
         Self {
-            name,
+            name: name.to_string(),
             description: None,
             size,
             // TODO(mdlayher): don't hard-code.
@@ -37,14 +37,19 @@ impl Export {
         }
     }
 
+    /// Sets a non-default block size for the `Export`.
     pub fn block_size(mut self, block_size: u32) -> Self {
         self.block_size = block_size;
         self
     }
 
     /// Sets a human-readable description for the `Export`.
-    pub fn description(mut self, description: String) -> Self {
-        self.description = Some(description);
+    pub fn description(mut self, description: &str) -> Self {
+        // Noop for empty strings.
+        if !description.is_empty() {
+            self.description = Some(description.to_string());
+        }
+
         self
     }
 
@@ -1182,9 +1187,7 @@ mod valid_tests {
 
     /// A synthetic export reused throughout all of the tests.
     fn test_export() -> Export {
-        Export::new("foo".to_string(), 256 * MiB)
-            .description("bar".to_string())
-            .readonly()
+        Export::new("foo", 256 * MiB).description("bar").readonly()
     }
 
     /// Returns a byte containing the low bits of all known TransmissionFlags.
@@ -1816,7 +1819,7 @@ mod valid_tests {
                         info_requests: vec![InfoType::Export],
                         // TODO(mdlayher): this is not a realistic export,
                         // consider updating.
-                        export: Export::new("".to_string(), 256*MiB)
+                        export: Export::new("", 256*MiB)
                             .block_size(0)
                             .readonly(),
                     }),

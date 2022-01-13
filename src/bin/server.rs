@@ -14,8 +14,7 @@ const GiB: u64 = 1 << 30;
 #[tokio::main]
 async fn main() {
     let devices = Devices::new(
-        Export::new("mdlayher nbd-rs".to_string(), 4 * GiB)
-            .description("An NBD server written in Rust".to_string()),
+        Export::new("mdlayher nbd-rs", 4 * GiB).description("An NBD server written in Rust"),
         Box::new(|| {
             // TODO(mdlayher): don't hard-code.
             let f = OpenOptions::new().read(true).write(true).open("disk.img")?;
