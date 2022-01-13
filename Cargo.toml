@@ -11,15 +11,6 @@ description = """
 An asynchronous Rust client and server implementation of the [Network Block
 Device (NBD)](https://en.wikipedia.org/wiki/Network_block_device) protocol.
 """
-default-run = "mdl-nbd-server"
-
-[[bin]]
-name = "mdl-nbd-client"
-path = "src/bin/client.rs"
-
-[[bin]]
-name = "mdl-nbd-server"
-path = "src/bin/server.rs"
 
 [dependencies]
 bitflags = "1.3.2"
@@ -27,6 +18,4 @@ bytes = "1.1.0"
 log = "0.4.14"
 num-derive= "0.3.3"
 num-traits = "0.2.14"
-# TODO(mdlayher): move into separate Cargo.toml for client/server binaries.
-stderrlog = "0.5.1"
 tokio = { version = "1.15.0", features = ["full"] }

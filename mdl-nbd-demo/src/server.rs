@@ -1,5 +1,6 @@
 extern crate mdl_nbd;
 extern crate stderrlog;
+extern crate tokio;
 
 use mdl_nbd::{Devices, Server};
 

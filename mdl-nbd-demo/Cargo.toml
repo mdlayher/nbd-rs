@@ -1,0 +1,27 @@
+[package]
+name = "mdl-nbd-demo"
+version = "0.1.0"
+edition = "2021"
+authors = ["Matt Layher <mdlayher@gmail.com>"]
+license = "MIT"
+homepage = "https://github.com/mdlayher/nbd-rs"
+repository = "https://github.com/mdlayher/nbd-rs"
+keywords = ["nbd", "nbd-server", "nbd-client", "tokio"]
+description = """
+Demo asynchronous Rust client and server applications for the [Network Block
+Device (NBD)] (https://en.wikipedia.org/wiki/Network_block_device) protocol.
+"""
+default-run = "mdl-nbd-server"
+
+[[bin]]
+name = "mdl-nbd-client"
+path = "src/client.rs"
+
+[[bin]]
+name = "mdl-nbd-server"
+path = "src/server.rs"
+
+[dependencies]
+mdl-nbd = { path = "../" }
+stderrlog = "0.5.1"
+tokio = { version = "1.15.0", features = ["full"] }
