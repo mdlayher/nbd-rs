@@ -17,7 +17,7 @@ pub struct Export {
     pub name: String,
     pub description: Option<String>,
     pub size: u64,
-    pub block_size: u32,
+    pub block_sizes: [u32; 3],
     _flags: TransmissionFlags,
 }
 
@@ -25,12 +25,17 @@ impl Export {
     /// Creates a new read/write `Export` with the given name and device size.
     /// Use the `readonly` method to produce a read-only `Export`.
     pub fn new(name: &str, size: u64) -> Self {
+        // The largest possible block size.
+        const MAX_INFINITE: u32 = 0xffffffff;
+
         Self {
             name: name.to_string(),
             description: None,
             size,
-            // TODO(mdlayher): don't hard-code.
-            block_size: 4096,
+            // Default values as recommended by the NBD protocol specification
+            // for regular files. Notably for block devices, the minimum and
+            // preferred values should likely be modified.
+            block_sizes: [1, 4096, MAX_INFINITE],
 
             // Force the use of our default flags in this library to prevent
             // weird misconfigurations.
@@ -38,9 +43,10 @@ impl Export {
         }
     }
 
-    /// Sets a non-default block size for the `Export`.
-    pub fn block_size(mut self, block_size: u32) -> Self {
-        self.block_size = block_size;
+    /// Sets non-default block sizes for the `Export`. The array values are the
+    /// minimum, preferred, and maximum block size, respectively.
+    pub fn block_size(mut self, block_sizes: [u32; 3]) -> Self {
+        self.block_sizes = block_sizes;
         self
     }
 
@@ -80,14 +86,18 @@ impl Export {
             ""
         };
 
+        let [min, pref, max] = self.block_sizes;
+
         format!(
-            "{}{}(size: {}MiB, block size: {}B)",
+            "{}{}(size: {}MiB, block sizes: {}/{}/{}B)",
             description,
             readonly,
             // TODO(mdlayher): this bytes to MiB calculation is good enough
             // for now but probably not very robust.
             self.size / MiB,
-            self.block_size
+            min,
+            pref,
+            max,
         )
     }
 }
@@ -486,8 +496,8 @@ impl GoResponse {
 
                             // TODO(mdlayher): break out
                             // minimum/preferred/maximum into export fields.
-                            for _ in 0..3 {
-                                dst.write_u32(export.block_size).await?;
+                            for bs in export.block_sizes {
+                                dst.write_u32(bs).await?;
                             }
                         }
                     }
@@ -970,10 +980,10 @@ impl ParsedResponse {
                     info_requests.push(InfoType::Description);
                     export.description = description;
                 }
-                OptionFragment::Go(GoFragment::BlockSize(_, pref, _)) => {
+                OptionFragment::Go(GoFragment::BlockSizes(block_sizes)) => {
                     // TODO(mdlayher): expose min/max as well.
                     info_requests.push(InfoType::BlockSize);
-                    export.block_size = pref;
+                    export.block_sizes = block_sizes;
                 }
                 OptionFragment::GoDone | OptionFragment::InfoDone => {}
                 _ => return Err(Error::HandshakeProtocol(frame_type)),
@@ -1021,7 +1031,7 @@ enum GoFragment {
     Export(u64, TransmissionFlags),
     Name(String),
     Description(Option<String>),
-    BlockSize(u32, u32, u32),
+    BlockSizes([u32; 3]),
 }
 
 impl<'a, 'b> OptionFragmentParser<'a, 'b> {
@@ -1178,7 +1188,7 @@ impl<'a, 'b> OptionFragmentParser<'a, 'b> {
                         let pref = get_u32(self.src)?;
                         let max = get_u32(self.src)?;
 
-                        Ok(OptionFragment::Go(GoFragment::BlockSize(min, pref, max)))
+                        Ok(OptionFragment::Go(GoFragment::BlockSizes([min, pref, max])))
                     }
                 }
             }
@@ -1540,11 +1550,11 @@ mod valid_tests {
                     // Block size info type
                     0, 3,
                     // Minimum size
-                    0, 0, 16, 0,
+                    0, 0, 0, 1,
                     // Preferred size
                     0, 0, 16, 0,
                     // Maximum size
-                    0, 0, 16, 0,
+                    0xff, 0xff, 0xff, 0xff,
                 ],
                 // Final acknowledgement
                 //
@@ -1619,14 +1629,14 @@ mod valid_tests {
                     // NBD_REP_SERVER
                     0, 0, 0, 2,
                     // Length
-                    0, 0, 0, 56,
+                    0, 0, 0, 70,
                     // Name length
                     0, 0, 0, 3,
                     // Name
                     b'f', b'o', b'o',
                 ],
                 // Metadata
-                b"bar [read-only] (size: 256MiB, block size: 4096B)",
+                b"bar [read-only] (size: 256MiB, block sizes: 1/4096/4294967295B)",
                 // Final acknowledgement
                 //
                 // Magic
@@ -1833,12 +1843,12 @@ mod valid_tests {
                         // TODO(mdlayher): this is not a realistic export,
                         // consider updating.
                         export: Export::new("", 256*MiB)
-                            .block_size(0)
-                            .readonly(),
+                            .block_size([0u32; 3])
+                            .readonly()
                     }),
                     OptionResponse::List(ListResponse(vec![ListExport{
                         name: "foo".to_string(),
-                        metadata: "bar (size: 256MiB, block size: 4096B)".to_string(),
+                        metadata: "bar (size: 256MiB, block sizes: 1/4096/4294967295B)".to_string(),
                     }])),
                     OptionResponse::Go(GoResponse::Unknown("not found".to_string())),
                     OptionResponse::Info(GoResponse::Unknown("not found".to_string())),
@@ -1925,11 +1935,11 @@ mod valid_tests {
                     // Block size info type
                     0, 3,
                     // Minimum size
-                    0, 0, 16, 0,
+                    0, 0, 0, 1,
                     // Preferred size
                     0, 0, 16, 0,
                     // Maximum size
-                    0, 0, 16, 0,
+                    0xff, 0xff, 0xff, 0xff,
                 ],
                 // Go acknowledgement
                 //
@@ -1985,14 +1995,14 @@ mod valid_tests {
                     // NBD_REP_SERVER
                     0, 0, 0, 2,
                     // Length
-                    0, 0, 0, 44,
+                    0, 0, 0, 58,
                     // Name length
                     0, 0, 0, 3,
                     // Name
                     b'f', b'o', b'o',
                 ],
                 // Metadata
-                b"bar (size: 256MiB, block size: 4096B)",
+                b"bar (size: 256MiB, block sizes: 1/4096/4294967295B)",
                 // List acknowledgement
                 //
                 // Magic
