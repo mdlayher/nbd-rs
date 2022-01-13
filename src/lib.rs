@@ -12,8 +12,8 @@ mod handshake;
 mod server;
 mod transmit;
 
-pub use client::Client;
-pub use handshake::frame::{Export, Exports};
+pub use client::{Client, ClientIoConnection};
+pub use handshake::frame::{Export, TransmissionFlags};
 pub use server::{Devices, Server, ServerConnection, ServerIoConnection};
 
 /// A generic Error produced by this crate.

@@ -23,7 +23,7 @@ pub struct Export {
 
 impl Export {
     /// Creates a new read/write `Export` with the given name and device size.
-    /// `readonly` method to produce a read-only `Export`.
+    /// Use the `readonly` method to produce a read-only `Export`.
     pub fn new(name: &str, size: u64) -> Self {
         Self {
             name: name.to_string(),
@@ -101,7 +101,7 @@ impl fmt::Display for Export {
 
 /// One or more [`Export`]s which can be exposed via the NBD server handshake.
 #[derive(Debug, PartialEq)]
-pub struct Exports {
+pub(crate) struct Exports {
     // The default export.
     export: Export,
     // Other exports.
@@ -110,7 +110,7 @@ pub struct Exports {
 
 impl Exports {
     /// Serves a single `Export` as the default export.
-    pub fn new(export: Export) -> Self {
+    pub(crate) fn new(export: Export) -> Self {
         Self {
             export,
             exports: vec![],
@@ -118,7 +118,7 @@ impl Exports {
     }
 
     /// Adds an additional non-default `Export` which may be queried by name.
-    pub fn export(&mut self, export: Export) -> &mut Self {
+    pub(crate) fn export(&mut self, export: Export) -> &mut Self {
         self.exports.push(export);
         self
     }

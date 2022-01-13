@@ -105,13 +105,9 @@ impl<D: Read + Write + Seek> Devices<D> {
     }
 
     /// Returns the device handle function for an export by `name` for client
-    /// use.
-    fn get(&self, name: &str) -> &DeviceFn<D> {
-        // We control the list of exports so it should be impossible to fail to
-        // look up an export by name when using the Server type.
-        self.devices
-            .get(name)
-            .expect("invariant violation: name was never added to the devices map")
+    /// use, if a device with the specified name exists.
+    pub fn get(&self, name: &str) -> Option<&DeviceFn<D>> {
+        self.devices.get(name)
     }
 }
 
@@ -166,7 +162,7 @@ impl Server {
         let (conn, export) = {
             let mut locks = locks.lock().await;
 
-            let (conn, export) = match conn.handshake(&devices.exports, &locks).await? {
+            let (conn, export) = match conn.handshake(&devices, &locks).await? {
                 Some(conn) => conn,
                 // Client didn't wish to initiate data transmission, do nothing.
                 None => return Ok(()),
@@ -180,8 +176,14 @@ impl Server {
         // Client wants to begin data transmission using this device. Once
         // transmission completes, drop the lock on the export.
         let result = {
+            // We control the list of exports so it should be impossible to fail
+            // to look up an export by name when using the Server type.
+            let open = devices
+                .get(&export.name)
+                .expect("invariant violation: name was never added to the devices map");
+
             // The name of the export is passed as a hint.
-            let mut device = devices.get(&export.name)(&export.name)?;
+            let mut device = open(&export.name)?;
             conn.transmit(&mut device).await
         };
         {
@@ -220,9 +222,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     /// If the client is ready for data transmission, `Some((ServerIoConnection,
     /// Export))` will be returned so data transmission can begin using the
     /// client's chosen export.
-    pub async fn handshake(
+    pub async fn handshake<D: Read + Write + Seek>(
         mut self,
-        exports: &Exports,
+        exports: &Devices<D>,
         locks: &HashSet<String>,
     ) -> crate::Result<Option<(ServerIoConnection<S>, Export)>> {
         // Send opening handshake, then negotiate options with client.
@@ -263,7 +265,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
             let response: Vec<OptionResponse> = client_options
                 .known
                 .into_iter()
-                .map(|request| OptionResponse::from_request(request, exports, locks))
+                .map(|request| OptionResponse::from_request(request, &exports.exports, locks))
                 .collect();
 
             debug!("server: {:?}", response);
