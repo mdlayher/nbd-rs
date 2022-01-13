@@ -102,10 +102,10 @@ impl fmt::Display for Error {
             Error::Incomplete => "stream ended early".fmt(fmt),
             Error::Unsupported => "device does not support this operation".fmt(fmt),
             Error::HandshakeProtocol(frame_type) => {
-                write!(fmt, "protocol error for handshake frame {:?}", frame_type)
+                write!(fmt, "protocol error for handshake frame {frame_type:?}")
             }
             Error::TransmitProtocol(frame_type) => {
-                write!(fmt, "protocol error for transmit frame {:?}", frame_type)
+                write!(fmt, "protocol error for transmit frame {frame_type:?}")
             }
             Error::Other(err) => err.fmt(fmt),
         }

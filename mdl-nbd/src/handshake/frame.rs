@@ -84,7 +84,7 @@ impl Export {
     fn metadata_string(&self) -> String {
         // Apply prefix data for better metadata listing.
         let description = match &self.description {
-            Some(s) => format!("{} ", s),
+            Some(s) => format!("{s} "),
             None => "".to_string(),
         };
 
@@ -94,26 +94,22 @@ impl Export {
             ""
         };
 
+        // TODO(mdlayher): this bytes to MiB calculation is good enough
+        // for now but probably not very robust.
+        let size = self.size / MiB;
+
         let [min, pref, max] = self.block_sizes;
 
-        format!(
-            "{}{}(size: {}MiB, block sizes: {}/{}/{}B)",
-            description,
-            readonly,
-            // TODO(mdlayher): this bytes to MiB calculation is good enough
-            // for now but probably not very robust.
-            self.size / MiB,
-            min,
-            pref,
-            max,
-        )
+        format!("{description}{readonly}(size: {size}MiB, block sizes: {min}/{pref}/{max}B)")
     }
 }
 
 impl fmt::Display for Export {
     /// Produces a human-readable description of an `Export`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.name, self.metadata_string())
+        let name = &self.name;
+        let meta = self.metadata_string();
+        write!(f, "{name}: {meta}")
     }
 }
 
@@ -373,7 +369,7 @@ impl OptionResponse {
 
                 match matched[..] {
                     [export] => export,
-                    _ => return GoResponse::Unknown(format!("export not found: {}", name)),
+                    _ => return GoResponse::Unknown(format!("export not found: {name}")),
                 }
             }
         };
@@ -381,10 +377,8 @@ impl OptionResponse {
         // If another client is already tranmsmitting with a given export and
         // the client sent a Go request, do not allow more connections.
         if matches!(code, GoOrInfo::Go) && locks.contains(&export.name) {
-            GoResponse::Unknown(format!(
-                "export is locked by another client: {}",
-                export.name
-            ))
+            let name = &export.name;
+            GoResponse::Unknown(format!("export is locked by another client: {name}"))
         } else {
             GoResponse::Ok {
                 info_requests: req.info_requests,
@@ -829,7 +823,7 @@ impl Frame {
                     dst.write_u64(REPLYMAGIC).await?;
                     dst.write_u32(*option).await?;
 
-                    let error = format!("unsupported option: {}", option);
+                    let error = format!("unsupported option: {option}");
 
                     dst.write_u32(NBD_REP_ERR_UNSUP).await?;
                     dst.write_u32(error.len() as u32).await?;
@@ -1245,10 +1239,10 @@ mod valid_tests {
 
                 let got = match Frame::parse(&mut src, frame_type).expect("failed to parse frame") {
                     $type(v) => v,
-                    frame => panic!("expected a {:?} frame, but got: {:?}", frame_type, frame),
+                    frame => panic!("expected a {frame_type:?} frame, but got: {frame:?}"),
                 };
 
-                assert!(want.eq(&got), "unexpected {:?} frame contents:\nwant: {:?}\n got: {:?}", frame_type, want, got);
+                assert!(want.eq(&got), "unexpected {frame_type:?} frame contents:\nwant: {want:?}\n got: {got:?}");
             }
         )*
         }
@@ -1425,7 +1419,7 @@ mod valid_tests {
             #[tokio::test]
             async fn $name() {
                 let (frame, want) = $value;
-                let frame_msg = format!("{:?}", frame);
+                let frame_msg = format!("{frame:?}");
 
                 let mut got = vec![];
                 frame.write(&mut got).await.expect("failed to write frame");
@@ -1433,8 +1427,7 @@ mod valid_tests {
                 assert_eq!(
                     &want[..],
                     &got[..],
-                    "unexpected frame bytes for {}",
-                    frame_msg
+                    "unexpected frame bytes for {frame_msg}",
                 );
             }
         )*
@@ -1677,8 +1670,7 @@ mod valid_tests {
                 assert_eq!(
                     &bytes[..],
                     &buf[..],
-                    "unexpected frame bytes for {:?}",
-                    frame,
+                    "unexpected frame bytes for {frame:?}",
                 );
 
                 let mut src = Cursor::new(&buf[..]);
@@ -2090,14 +2082,14 @@ mod valid_tests {
             #[tokio::test]
             async fn $name() {
                 let frame = $value;
-                let frame_msg = format!("{:?}", frame);
+                let frame_msg = format!("{frame:?}");
 
                 let mut got = vec![];
                 let result = frame.write(&mut got).await.expect("failed to write frame");
 
                 assert!(matches!(result, None), "expected None return from write");
 
-                assert!(got.is_empty(), "expected empty frame bytes for {}: {:?}", frame_msg, got);
+                assert!(got.is_empty(), "expected empty frame bytes for {frame_msg}: {got:?}");
             }
         )*
         }
@@ -2123,7 +2115,7 @@ mod invalid_tests {
 
                 let err = Frame::check(&mut src, frame_type).expect_err("frame check succeeded");
 
-                assert!(matches!(err, Error::Incomplete), "expected Error::Incomplete, but got: {:?}", err);
+                assert!(matches!(err, Error::Incomplete), "expected Error::Incomplete, but got: {err:?}");
             }
         )*
         }
@@ -2143,7 +2135,7 @@ mod invalid_tests {
 
                 let err = Frame::parse(&mut src, frame_type).expect_err("frame parse succeeded");
 
-                assert!(matches!(err, Error::HandshakeProtocol(_)), "expected Error::HandshakeProtocol, but got: {:?}", err);
+                assert!(matches!(err, Error::HandshakeProtocol(_)), "expected Error::HandshakeProtocol, but got: {err:?}");
             }
         )*
         }

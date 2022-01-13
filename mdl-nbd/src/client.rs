@@ -130,11 +130,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         };
 
         if !server_options.unknown.is_empty() {
-            return Err(format!(
-                "server did not recognize options: {:?}",
-                server_options.unknown,
-            )
-            .into());
+            let unknown = server_options.unknown;
+            return Err(format!("server did not recognize options: {unknown:?}").into());
         }
 
         Ok(server_options.known)

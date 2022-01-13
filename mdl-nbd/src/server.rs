@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use log::debug;
+use log::{debug, error};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, Write};
@@ -59,7 +59,7 @@ impl Devices<File> {
             }
         };
 
-        debug!("new export: {}", export);
+        debug!("new export: {export}");
         Ok(Self::new(export, Self::file_open(readonly)))
     }
 
@@ -146,8 +146,7 @@ impl Server {
                 let conn = ServerConnection::new(socket);
 
                 if let Err(err) = Self::process(&devices, &locks, conn).await {
-                    // TODO(mdlayher): error reporting through another channel.
-                    println!("{:?}: error: {:?}", addr, err);
+                    error!("{addr:?}: error: {err:?}");
                 }
             });
         }
@@ -249,7 +248,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 Err(_) => return Ok(None),
             };
 
-            debug!("client: {:?}", client_options);
+            debug!("client: {client_options:?}");
 
             // We expect the client to match our hard-coded flags.
             if !client_options
@@ -268,7 +267,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 .map(|request| OptionResponse::from_request(request, &devices.exports, locks))
                 .collect();
 
-            debug!("server: {:?}", response);
+            debug!("server: {response:?}");
 
             if response
                 .iter()
