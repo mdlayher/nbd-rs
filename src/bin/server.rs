@@ -1,7 +1,8 @@
-use std::fs::OpenOptions;
-
 extern crate mdl_nbd;
+extern crate stderrlog;
+
 use mdl_nbd::{Devices, Export, Server};
+use std::fs::OpenOptions;
 
 /// A symbolic constant for 1 GiB.
 #[allow(non_upper_case_globals)]
@@ -13,6 +14,12 @@ const GiB: u64 = 1 << 30;
 
 #[tokio::main]
 async fn main() {
+    stderrlog::new()
+        .color(stderrlog::ColorChoice::Never)
+        .verbosity(3)
+        .init()
+        .unwrap();
+
     let devices = Devices::new(
         Export::new("mdlayher nbd-rs", 4 * GiB).description("An NBD server written in Rust"),
         Box::new(|| {

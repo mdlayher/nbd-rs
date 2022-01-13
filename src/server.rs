@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
@@ -191,7 +192,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 Err(_) => return Ok(None),
             };
 
-            dbg!(&client_options);
+            debug!("client: {:?}", client_options);
 
             // We expect the client to match our hard-coded flags.
             if !client_options
@@ -209,6 +210,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                 .into_iter()
                 .map(|request| OptionResponse::from_request(request, exports, locks))
                 .collect();
+
+            debug!("server: {:?}", response);
 
             if response
                 .iter()
@@ -242,8 +245,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
                     }
                 })
                 .next();
-
-            dbg!(&response);
 
             // Respond to known options.
             self.conn

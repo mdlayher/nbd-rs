@@ -2,6 +2,7 @@
 //! Device (NBD)](https://en.wikipedia.org/wiki/Network_block_device) protocol.
 
 extern crate bitflags;
+extern crate log;
 extern crate num_derive;
 
 mod client;
