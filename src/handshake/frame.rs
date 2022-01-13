@@ -4,6 +4,7 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::cmp::max;
 use std::collections::HashSet;
+use std::fmt;
 use std::io::{self, Cursor, Write};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -63,6 +64,39 @@ impl Export {
     pub fn flags(&self) -> TransmissionFlags {
         self._flags
     }
+
+    /// Produces a human-readable string of all of the `Export`'s metadata, with
+    /// exception of its name.
+    fn metadata_string(&self) -> String {
+        // Apply prefix data for better metadata listing.
+        let description = match &self.description {
+            Some(s) => format!("{} ", s),
+            None => "".to_string(),
+        };
+
+        let readonly = if self._flags.contains(TransmissionFlags::READ_ONLY) {
+            "[read-only] "
+        } else {
+            ""
+        };
+
+        format!(
+            "{}{}(size: {}MiB, block size: {}B)",
+            description,
+            readonly,
+            // TODO(mdlayher): this bytes to MiB calculation is good enough
+            // for now but probably not very robust.
+            self.size / MiB,
+            self.block_size
+        )
+    }
+}
+
+impl fmt::Display for Export {
+    /// Produces a human-readable description of an `Export`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.name, self.metadata_string())
+    }
 }
 
 /// One or more [`Export`]s which can be exposed via the NBD server handshake.
@@ -84,7 +118,7 @@ impl Exports {
     }
 
     /// Adds an additional non-default `Export` which may be queried by name.
-    pub fn export(mut self, export: Export) -> Self {
+    pub fn export(&mut self, export: Export) -> &mut Self {
         self.exports.push(export);
         self
     }
@@ -513,28 +547,7 @@ impl From<Export> for ListExport {
     /// Converts an `Export` into a `ListExport` by packing fields in a
     /// structured way into metadata.
     fn from(src: Export) -> ListExport {
-        // Apply prefix data for better metadata listing.
-        let description = match src.description {
-            Some(s) => format!("{} ", s),
-            None => "".to_string(),
-        };
-
-        let readonly = if src._flags.contains(TransmissionFlags::READ_ONLY) {
-            "[read-only] "
-        } else {
-            ""
-        };
-
-        let metadata = format!(
-            "{}{}(size: {}MiB, block size: {}B)",
-            description,
-            readonly,
-            // TODO(mdlayher): this bytes to MiB calculation is good enough
-            // for now but probably not very robust.
-            src.size / MiB,
-            src.block_size
-        );
-
+        let metadata = src.metadata_string();
         ListExport {
             name: src.name,
             metadata,

@@ -1,12 +1,7 @@
 extern crate mdl_nbd;
 extern crate stderrlog;
 
-use mdl_nbd::{Devices, Export, Server};
-use std::fs::OpenOptions;
-
-/// A symbolic constant for 1 GiB.
-#[allow(non_upper_case_globals)]
-const GiB: u64 = 1 << 30;
+use mdl_nbd::{Devices, Server};
 
 // Snippet for testing:
 //
@@ -20,14 +15,7 @@ async fn main() {
         .init()
         .unwrap();
 
-    let devices = Devices::new(
-        Export::new("mdlayher nbd-rs", 4 * GiB).description("An NBD server written in Rust"),
-        Box::new(|| {
-            // TODO(mdlayher): don't hard-code.
-            let f = OpenOptions::new().read(true).write(true).open("disk.img")?;
-            Ok(f)
-        }),
-    );
+    let devices = Devices::file("disk.img").expect("failed to open file device");
 
     let server = Server::bind("[::]:10809")
         .await

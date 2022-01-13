@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use log::debug;
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,8 +26,61 @@ pub struct Devices<D> {
     devices: HashMap<String, DeviceFn<D>>,
 }
 
-/// A function which produces a handle to a device.
-pub type DeviceFn<D> = Box<dyn Fn() -> crate::Result<D> + Send + Sync>;
+/// A function which produces a handle to a device, given the name of the
+/// export.
+pub type DeviceFn<D> = Box<dyn Fn(&str) -> crate::Result<D> + Send + Sync>;
+
+impl Devices<File> {
+    /// Constructs a `Devices` using `path` to open a local file as the default
+    /// export.
+    pub fn file(path: &str) -> crate::Result<Self> {
+        // TODO(mdlayher): the usual approach for file names is AsRef<Path> but
+        // we need to use the string in multiple places. Look into this.
+
+        // The file needs to exist and must be a regular file. Since the file
+        // will be opened dynamically as needed later on to export to clients,
+        // we'll have to repeat the same checks there.
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err("can only export regular files".into());
+        }
+
+        let readonly = metadata.permissions().readonly();
+
+        let export = {
+            // Construct the export using file metadata.
+            //
+            // TODO(mdlayher): block size?
+            let export = Export::new(path, metadata.len()).description("file export");
+            if !readonly {
+                export
+            } else {
+                export.readonly()
+            }
+        };
+
+        debug!("new export: {}", export);
+        Ok(Self::new(export, Self::file_open(readonly)))
+    }
+
+    /// Produces a `DeviceFn<File>` which obeys the file's write restrictions.
+    fn file_open(readonly: bool) -> DeviceFn<File> {
+        Box::new(move |path| {
+            // It might be possible for the file's read-only state to change
+            // while the program is running, but since we've already created the
+            // export and advertised it as read-only or read/write, we continue
+            // to obey that decision in subsequent file opens.
+            let file = OpenOptions::new().read(true).write(!readonly).open(path)?;
+
+            let metadata = file.metadata()?;
+            if metadata.is_file() {
+                Ok(file)
+            } else {
+                Err("can only export regular files".into())
+            }
+        })
+    }
+}
 
 impl<D: Read + Write + Seek> Devices<D> {
     /// Constructs a new `Devices` using `export` as the default export and
@@ -45,7 +99,7 @@ impl<D: Read + Write + Seek> Devices<D> {
     /// export can be queried by name.
     pub fn export(mut self, export: Export, open: DeviceFn<D>) -> Self {
         let name = export.name.clone();
-        self.exports = self.exports.export(export);
+        self.exports.export(export);
         self.devices.insert(name, open);
         self
     }
@@ -126,7 +180,8 @@ impl Server {
         // Client wants to begin data transmission using this device. Once
         // transmission completes, drop the lock on the export.
         let result = {
-            let mut device = devices.get(&export.name)()?;
+            // The name of the export is passed as a hint.
+            let mut device = devices.get(&export.name)(&export.name)?;
             conn.transmit(&mut device).await
         };
         {
