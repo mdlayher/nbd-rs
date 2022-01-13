@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use log::{debug, error};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -70,7 +70,7 @@ impl Devices<File> {
             // while the program is running, but since we've already created the
             // export and advertised it as read-only or read/write, we continue
             // to obey that decision in subsequent file opens.
-            let file = OpenOptions::new().read(true).write(!readonly).open(path)?;
+            let file = File::options().read(true).write(!readonly).open(path)?;
 
             let metadata = file.metadata()?;
             if metadata.is_file() {
