@@ -1,6 +1,10 @@
 extern crate mdl_nbd;
 use mdl_nbd::Client;
 
+// This application doesn't do much yet since many of the NBD client features
+// are incomplete. It just tests that we can successfully negotiate a connection
+// with the default export and then disconnect from I/O.
+
 #[tokio::main]
 async fn main() {
     let client = Client::connect("[::1]:10809")
