@@ -82,7 +82,7 @@ impl Devices<File> {
     }
 }
 
-impl<D> Devices<D> {
+impl<D: ReadWrite> Devices<D> {
     /// Constructs a new `Devices` using `export` as the default export and
     /// `open` to open a device handle for I/O transmission operations.
     pub fn new(export: Export, open: DeviceFn<D>) -> Self {
@@ -221,7 +221,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     /// If the client is ready for data transmission, `Some((ServerIoConnection,
     /// Export))` will be returned so data transmission can begin using the
     /// client's chosen export.
-    pub async fn handshake<D>(
+    pub async fn handshake<D: ReadWrite>(
         mut self,
         devices: &Devices<D>,
         locks: &HashSet<String>,

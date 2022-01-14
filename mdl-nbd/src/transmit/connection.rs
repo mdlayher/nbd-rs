@@ -8,7 +8,7 @@ use crate::{Read, ReadWrite};
 
 /// An abstraction over the capabilities of a given device, such as whether the
 /// device is read-only or read/write.
-pub(crate) enum Device<R, RW> {
+pub(crate) enum Device<R: Read, RW: ReadWrite> {
     Read(R),
     ReadWrite(RW),
 }
@@ -125,7 +125,11 @@ where
 
 /// A low level NBD connection type which handles data transmission operations
 /// between a client stream and an exported device.
-pub(crate) struct RawIoConnection<R, RW, S> {
+pub(crate) struct RawIoConnection<R, RW, S>
+where
+    R: Read,
+    RW: ReadWrite,
+{
     device: Device<R, RW>,
     device_buffer: Vec<u8>,
     stream: BufWriter<S>,
