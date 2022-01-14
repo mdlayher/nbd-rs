@@ -21,6 +21,7 @@ pub enum FrameType {
 #[derive(Debug)]
 pub(crate) enum Errno {
     None = NBD_OK,
+    Permission = NBD_EPERM,
     Invalid = NBD_EINVAL,
     NotSupported = NBD_ENOTSUP,
 }
@@ -31,6 +32,17 @@ impl<T> From<Result<T>> for Errno {
         match src {
             Ok(_) => Errno::None,
             Err(err) => err.into(),
+        }
+    }
+}
+
+impl From<io::Error> for Errno {
+    /// Converts `io::Error` into the equivalent `Errno` value.
+    fn from(src: io::Error) -> Self {
+        match src.kind() {
+            io::ErrorKind::PermissionDenied => Errno::Permission,
+            io::ErrorKind::Unsupported => Errno::NotSupported,
+            _ => Errno::Invalid,
         }
     }
 }
@@ -62,6 +74,7 @@ pub(crate) enum Frame<'a> {
 
     // Write operations; WriteResponse is used for all requests.
     FlushRequest(Header),
+    TrimRequest(Header),
     WriteRequest(Header, &'a [u8]),
 }
 
@@ -84,6 +97,7 @@ pub(crate) enum IoType {
     Disconnect = NBD_CMD_DISC,
     Flush = NBD_CMD_FLUSH,
     Read = NBD_CMD_READ,
+    Trim = NBD_CMD_TRIM,
     Write = NBD_CMD_WRITE,
 }
 
@@ -115,7 +129,10 @@ impl<'a> Frame<'a> {
 
         match FromPrimitive::from_u16(io_type) {
             // Nothing to do.
-            Some(IoType::Disconnect) | Some(IoType::Flush) | Some(IoType::Read) => Ok(()),
+            Some(IoType::Disconnect)
+            | Some(IoType::Flush)
+            | Some(IoType::Read)
+            | Some(IoType::Trim) => Ok(()),
             // Make sure we can consume a full write.
             Some(IoType::Write) => skip(src, length),
             None => Err(Error::TransmitProtocol(FrameType::Request)),
@@ -149,6 +166,7 @@ impl<'a> Frame<'a> {
             Some(IoType::Disconnect) => Frame::Disconnect,
             Some(IoType::Flush) => Frame::FlushRequest(header),
             Some(IoType::Read) => Frame::ReadRequest(header),
+            Some(IoType::Trim) => Frame::TrimRequest(header),
             Some(IoType::Write) => {
                 // Write buffer lies beyond the end of the header, borrow it so
                 // we can write it to the device.
@@ -203,7 +221,10 @@ impl<'a> Frame<'a> {
                 Ok(Some(()))
             }
             // Cannot handle writing other I/O responses yet.
-            Self::FlushRequest(..) | Self::ReadRequest(..) | Self::WriteRequest(..) => todo!(),
+            Self::FlushRequest(..)
+            | Self::ReadRequest(..)
+            | Self::TrimRequest(..)
+            | Self::WriteRequest(..) => todo!(),
         }
     }
 }

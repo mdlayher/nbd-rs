@@ -74,6 +74,11 @@ impl Export {
         self
     }
 
+    pub fn trim(mut self) -> Self {
+        self._flags.set(TransmissionFlags::SEND_TRIM, true);
+        self
+    }
+
     /// Returns the set of `TransmissionFlags` applied to this `Export`.
     pub fn flags(&self) -> TransmissionFlags {
         self._flags

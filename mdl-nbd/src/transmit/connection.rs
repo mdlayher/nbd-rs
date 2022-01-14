@@ -71,6 +71,16 @@ where
         }
     }
 
+    fn trim(&mut self, req: &Header) -> Result<()> {
+        match self {
+            Self::Read(..) => Err(Error::Unsupported),
+            Self::ReadWrite(rw) => {
+                rw.trim(req.offset, req.length as u64)?;
+                Ok(())
+            }
+        }
+    }
+
     /// Handles a single I/O operation `req` with the device buffer `buf`.
     fn handle_io<'a>(&mut self, req: &'a Frame, buf: &mut [u8]) -> Option<Frame<'a>> {
         match req {
@@ -98,6 +108,10 @@ where
                 };
 
                 Some(res)
+            }
+            Frame::TrimRequest(req) => {
+                let errno = self.trim(req).into();
+                Some(Frame::ErrorResponse(errno))
             }
             Frame::WriteRequest(req, buf) => {
                 let errno = self.write_all_at(req, buf).into();
