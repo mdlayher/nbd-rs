@@ -131,23 +131,23 @@ mod unix {
             // setting start to zero and len to ULLONG_MAX."
             //
             // Reference: https://lwn.net/Articles/417809/.
-            let data = &[_fstrim_range {
+            let data = _fstrim_range {
                 start: offset,
                 len: length,
                 // Trim everything.
                 minlen: 0,
-            }];
+            };
 
             // TODO(mdlayher): test with a real SSD to confirm these return and
             // error values.
 
             debug!("trim  in: {data:?}");
-            let res = unsafe { _ioctl_fitrim(fd, data) };
+            let res = unsafe { _ioctl_fitrim(fd, &data) };
             debug!("trim out: {res:?} {data:?}");
 
             match res {
                 // The number of bytes trimmed.
-                Ok(_) => Ok(data[0].len),
+                Ok(_) => Ok(data.len),
                 // Permission denied.
                 Err(Errno::EPERM) => Err(io::ErrorKind::PermissionDenied.into()),
                 // This device, filesystem, or mounted filesystem configuration
@@ -171,7 +171,7 @@ mod unix {
 
         // Equivalent to Linux's FITRIM ioctl:
         // #define FITRIM _IOWR('X', 121, struct fstrim_range)
-        nix::ioctl_write_buf!(_ioctl_fitrim, 'X', 121, _fstrim_range);
+        nix::ioctl_write_ptr!(_ioctl_fitrim, 'X', 121, _fstrim_range);
     }
 }
 
