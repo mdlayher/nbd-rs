@@ -193,6 +193,7 @@ bitflags! {
         const SEND_FLUSH = NBD_FLAG_SEND_FLUSH;
         const SEND_FUA   = NBD_FLAG_SEND_FUA;
         const ROTATIONAL = NBD_FLAG_ROTATIONAL;
+        const SEND_TRIM  = NBD_FLAG_SEND_TRIM;
     }
 }
 

@@ -15,7 +15,7 @@ use mdl_nbd::{Devices, Server};
 // In another terminal, negotiate a connection in userspace, hand it off to the
 // Linux kernel NBD client, run a dd read test into /dev/null, then disconnect
 // from all NBD devices:
-// $ sudo modprobe nbd && sudo nbd-client ::1 && sudo dd bs=1M if=/dev/nbd0 of=/dev/null && for i in `seq 0 15`; do sudo nbd-client -d /dev/nbd$i; done
+// $ sudo modprobe nbd && sudo nbd-client ::1 && sudo dd bs=32K if=/dev/nbd0 of=/dev/null && for i in `seq 0 15`; do sudo nbd-client -d /dev/nbd$i; done
 
 #[tokio::main]
 async fn main() {

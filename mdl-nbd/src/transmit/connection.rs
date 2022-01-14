@@ -1,5 +1,5 @@
 use bytes::{Buf, BytesMut};
-use std::io::{Cursor, SeekFrom};
+use std::io::{self, Cursor, SeekFrom};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
 use super::frame::{CommandFlags, Errno, Frame, Header};
@@ -20,28 +20,38 @@ where
     R: Read,
     RW: ReadWrite,
 {
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        let pos = SeekFrom::Start(offset);
+    fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
         let length = match self {
-            Self::Read(r) => {
-                r.seek(pos)?;
-                r.read(buf)?
-            }
-            Self::ReadWrite(rw) => {
-                rw.seek(pos)?;
-                rw.read(buf)?
-            }
+            Self::Read(r) => Self::_read_at(r, buf, offset)?,
+            Self::ReadWrite(rw) => Self::_read_at(rw, buf, offset)?,
         };
 
         Ok(length)
+    }
+
+    fn _read_at(r: &mut impl Read, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        // Make use of fused operation where possible, or fall back to manual
+        // read+seek.
+        if let Some(res) = r.read_at(buf, offset) {
+            res
+        } else {
+            r.seek(SeekFrom::Start(offset))?;
+            r.read(buf)
+        }
     }
 
     fn write_all_at(&mut self, req: &Header, buf: &[u8]) -> Result<()> {
         match self {
             Self::Read(..) => Err(Error::Unsupported),
             Self::ReadWrite(rw) => {
-                rw.seek(SeekFrom::Start(req.offset))?;
-                rw.write_all(buf)?;
+                // Make use of fused operation where possible, or fall back to
+                // manual write+seek.
+                if let Some(res) = rw.write_all_at(buf, req.offset) {
+                    res?
+                } else {
+                    rw.seek(SeekFrom::Start(req.offset))?;
+                    rw.write_all(buf)?
+                };
 
                 if req.flags.contains(CommandFlags::FUA) {
                     // Client wants us to flush the write buffer before replying
@@ -82,7 +92,7 @@ where
                 // Ignore flags for now. Some clients may set FUA or similar it
                 // is only valid for writes.
 
-                let res = match self.read_at(req.offset, &mut buf[..req.length]) {
+                let res = match self.read_at(&mut buf[..req.length], req.offset) {
                     Ok(length) => Frame::ReadResponse(length),
                     Err(err) => Frame::ErrorResponse(err.into()),
                 };
