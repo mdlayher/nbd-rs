@@ -1,12 +1,13 @@
 use bytes::BytesMut;
 use std::io;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
 // TODO(mdlayher): try to avoid usage of *.
 use crate::handshake::frame::{Frame as HandshakeFrame, *};
 use crate::handshake::RawConnection;
 use crate::transmit::Frame as TransmitFrame;
+use crate::Stream;
 
 /// An NBD client connection which can query information and perform I/O
 /// transmission operations with a server export.
@@ -29,7 +30,7 @@ impl Client<TcpStream> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+impl<S: Stream> Client<S> {
     /// Initiates the NBD client handshake with a server using `stream`
     /// (typically a TCP connection, but this is not required) to produce a
     /// `Client` which can then query metadata or perform I/O transmission
@@ -165,7 +166,7 @@ pub struct ClientIoConnection<S> {
     handle: u64,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> ClientIoConnection<S> {
+impl<S: Stream> ClientIoConnection<S> {
     /// Creates a connection ready for I/O by consuming the stream and buffer
     /// from the handshake phase.
     pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, flags: TransmissionFlags) -> Self {

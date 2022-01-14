@@ -1,6 +1,8 @@
 use bytes::{Buf, BytesMut};
 use std::io::{self, Cursor};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+
+use crate::Stream;
 
 use super::frame::*;
 
@@ -11,7 +13,7 @@ pub(crate) struct RawConnection<S> {
     pub(crate) buffer: BytesMut,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
+impl<S: Stream> RawConnection<S> {
     /// Creates an NBD server connection from `stream`.
     pub(crate) fn new(stream: S) -> Self {
         RawConnection {

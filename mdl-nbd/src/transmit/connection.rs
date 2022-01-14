@@ -1,10 +1,10 @@
 use bytes::{Buf, BytesMut};
 use std::io::{self, Cursor, SeekFrom};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 
 use super::frame::{CommandFlags, Errno, Frame, Header};
 use crate::frame::{Error, Result};
-use crate::{Read, ReadWrite};
+use crate::{Read, ReadWrite, Stream};
 
 /// An abstraction over the capabilities of a given device, such as whether the
 /// device is read-only or read/write.
@@ -144,7 +144,7 @@ impl<R, RW, S> RawIoConnection<R, RW, S>
 where
     R: Read,
     RW: ReadWrite,
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: Stream,
 {
     /// Consumes the fields of a `ServerIoConnection` and allocates buffers to
     /// begin handling I/O for `device`.

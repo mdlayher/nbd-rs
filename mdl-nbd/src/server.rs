@@ -4,14 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
+use tokio::io::BufWriter;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio::sync::Mutex;
 
 use crate::handshake::frame::*;
 use crate::handshake::RawConnection;
 use crate::transmit::{Device, RawIoConnection};
-use crate::ReadWrite;
+use crate::{ReadWrite, Stream};
 
 /// An NBD server which can accept incoming TCP connections and serve one or
 /// more exported devices for client use.
@@ -199,7 +199,7 @@ pub struct ServerConnection<S> {
     conn: RawConnection<S>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
+impl<S: Stream> ServerConnection<S> {
     /// Creates an NBD server connection wrapping `stream` (typically an
     /// accepted client TCP connection) and allocates memory to begin serving
     /// the client's requests.
@@ -333,7 +333,7 @@ pub struct ServerIoConnection<S> {
     flags: TransmissionFlags,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
+impl<S: Stream> ServerIoConnection<S> {
     /// Creates a connection ready for I/O by consuming the stream and buffer
     /// from the handshake phase.
     pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, flags: TransmissionFlags) -> Self {

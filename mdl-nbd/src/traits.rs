@@ -1,4 +1,12 @@
 use std::io::{self, Cursor};
+use tokio::io::{AsyncRead, AsyncWrite};
+
+/// A type which contains a stream of request and response data, typically
+/// backed by a network connection.
+pub trait Stream: AsyncRead + AsyncWrite + Unpin {}
+
+// Blanket implementation for Stream.
+impl<T: AsyncRead + AsyncWrite + Unpin> Stream for T {}
 
 /// A type which may be used as a read-only device.
 pub trait Read: io::Read + io::Seek {
