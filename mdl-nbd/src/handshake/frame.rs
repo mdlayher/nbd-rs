@@ -74,6 +74,8 @@ impl Export {
         self
     }
 
+    /// Marks this `Export` as being capable of handling the TRIM command,
+    /// which is used to discard unused bytes on solid-state media.
     pub fn trim(mut self) -> Self {
         self._flags.set(TransmissionFlags::SEND_TRIM, true);
         self
