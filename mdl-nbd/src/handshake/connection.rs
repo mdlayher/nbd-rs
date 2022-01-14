@@ -16,7 +16,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RawConnection<S> {
     pub(crate) fn new(stream: S) -> Self {
         RawConnection {
             stream: BufWriter::new(stream),
-            buffer: BytesMut::with_capacity(8 * 1024),
+            buffer: BytesMut::with_capacity(32 * 1024),
         }
     }
 
