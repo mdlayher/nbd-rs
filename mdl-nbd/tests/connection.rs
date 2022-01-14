@@ -96,8 +96,8 @@ async fn go() {
             .get(&export.name)
             .expect("device handle was not found");
 
-        let mut device = open(&export.name).expect("failed to open device");
-        conn.transmit(&mut device)
+        let device = open(&export.name).expect("failed to open device");
+        conn.transmit(device)
             .await
             .expect("failed to transmit data");
     });

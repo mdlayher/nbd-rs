@@ -2,7 +2,6 @@ use bytes::BytesMut;
 use log::{debug, error};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{Read, Seek, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
@@ -12,6 +11,7 @@ use tokio::sync::Mutex;
 use crate::handshake::frame::*;
 use crate::handshake::RawConnection;
 use crate::transmit::{Device, RawIoConnection};
+use crate::ReadWrite;
 
 /// An NBD server which can accept incoming TCP connections and serve one or
 /// more exported devices for client use.
@@ -82,7 +82,7 @@ impl Devices<File> {
     }
 }
 
-impl<D: Read + Write + Seek> Devices<D> {
+impl<D: ReadWrite> Devices<D> {
     /// Constructs a new `Devices` using `export` as the default export and
     /// `open` to open a device handle for I/O transmission operations.
     pub fn new(export: Export, open: DeviceFn<D>) -> Self {
@@ -126,7 +126,7 @@ impl Server {
     }
 
     /// Continuously accepts and serves incoming NBD connections for `devices`.
-    pub async fn run<D: 'static + Read + Write + Seek + Send>(
+    pub async fn run<D: 'static + ReadWrite + Send>(
         self,
         devices: Devices<D>,
     ) -> crate::Result<()> {
@@ -153,7 +153,7 @@ impl Server {
     }
 
     /// Processes a single incoming NBD client connection.
-    async fn process<D: Read + Write + Seek>(
+    async fn process<D: ReadWrite>(
         devices: &Devices<D>,
         locks: &Mutex<HashSet<String>>,
         conn: ServerConnection<TcpStream>,
@@ -182,8 +182,8 @@ impl Server {
                 .expect("invariant violation: name was never added to the devices map");
 
             // The name of the export is passed as a hint.
-            let mut device = open(&export.name)?;
-            conn.transmit(&mut device).await
+            let device = open(&export.name)?;
+            conn.transmit(device).await
         };
         {
             let mut locks = locks.lock().await;
@@ -221,7 +221,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerConnection<S> {
     /// If the client is ready for data transmission, `Some((ServerIoConnection,
     /// Export))` will be returned so data transmission can begin using the
     /// client's chosen export.
-    pub async fn handshake<D: Read + Write + Seek>(
+    pub async fn handshake<D: ReadWrite>(
         mut self,
         devices: &Devices<D>,
         locks: &HashSet<String>,
@@ -347,7 +347,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ServerIoConnection<S> {
     /// Begins data transmission with a client using `device` as the export for
     /// I/O operations. This method blocks until the client disconnects or an
     /// unrecoverable error occurs.
-    pub async fn transmit<D: Read + Write + Seek>(self, device: D) -> crate::Result<()> {
+    pub async fn transmit<D: ReadWrite>(self, device: D) -> crate::Result<()> {
         // Infer the capabilities of the device and pass the appropriate Device
         // variant.
         let device = if self.flags.contains(TransmissionFlags::READ_ONLY) {

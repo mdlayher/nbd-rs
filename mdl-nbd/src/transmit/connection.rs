@@ -1,13 +1,14 @@
 use bytes::{Buf, BytesMut};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, SeekFrom};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
 use super::frame::{CommandFlags, Errno, Frame, Header};
 use crate::frame::{Error, Result};
+use crate::{Read, ReadWrite};
 
 /// An abstraction over the capabilities of a given device, such as whether the
 /// device is read-only or read/write.
-pub(crate) enum Device<R: Read + Seek, RW: Read + Write + Seek> {
+pub(crate) enum Device<R: Read, RW: ReadWrite> {
     Read(R),
     ReadWrite(RW),
 }
@@ -16,8 +17,8 @@ pub(crate) enum Device<R: Read + Seek, RW: Read + Write + Seek> {
 /// given concrete type.
 impl<R, RW> Device<R, RW>
 where
-    R: Read + Seek,
-    RW: Read + Write + Seek,
+    R: Read,
+    RW: ReadWrite,
 {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let pos = SeekFrom::Start(offset);
@@ -102,8 +103,8 @@ where
 /// between a client stream and an exported device.
 pub(crate) struct RawIoConnection<R, RW, S>
 where
-    R: Read + Seek,
-    RW: Read + Write + Seek,
+    R: Read,
+    RW: ReadWrite,
 {
     device: Device<R, RW>,
     device_buffer: Vec<u8>,
@@ -113,8 +114,8 @@ where
 
 impl<R, RW, S> RawIoConnection<R, RW, S>
 where
-    R: Read + Seek,
-    RW: Read + Write + Seek,
+    R: Read,
+    RW: ReadWrite,
     S: AsyncRead + AsyncWrite + Unpin,
 {
     /// Consumes the fields of a `ServerIoConnection` and allocates buffers to

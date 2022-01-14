@@ -10,11 +10,13 @@ mod consts;
 mod frame;
 mod handshake;
 mod server;
+mod traits;
 mod transmit;
 
 pub use client::{Client, ClientIoConnection};
 pub use handshake::frame::{Export, TransmissionFlags};
 pub use server::{Devices, Server, ServerConnection, ServerIoConnection};
+pub use traits::{Read, ReadWrite, ReadWriteTrimExt};
 
 /// A generic Error produced by this crate.
 ///
