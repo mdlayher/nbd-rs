@@ -28,6 +28,14 @@ pub trait ReadWrite: Read + io::Write {
         None
     }
 
+    /// Devices may optionally support a durable sync operation, such as `fsync`
+    /// on Linux files. By default, this method calls `io::Write::flush(self)`.
+    fn sync(&mut self) -> io::Result<()> {
+        // TODO(mdlayher): consider Option pattern as above if durable sync
+        // cannot be honored, such as with a Cursor.
+        io::Write::flush(self)
+    }
+
     /// Devices may optionally support the TRIM operation. By default, this
     /// method is a no-op because the NBD specification specifies that a server
     /// MAY choose to discard bytes at its discretion.
@@ -39,6 +47,17 @@ pub trait ReadWrite: Read + io::Write {
 
 // Trait implementations for types commonly used with this library. Types copied
 // from io::Read and io::Write implementations for these types.
+
+/// Implements the `ReadWrite` trait's `sync` method for a `File` or `&File`.
+macro_rules! impl_file_sync {
+    () => {
+        /// Durably sync file data using `File::sync_all(self)`.
+        fn sync(&mut self) -> io::Result<()> {
+            io::Write::flush(self)?;
+            File::sync_all(self)
+        }
+    };
+}
 
 #[cfg(unix)]
 mod unix {
@@ -70,6 +89,8 @@ mod unix {
             Some(FileExt::write_all_at(self, buf, offset))
         }
 
+        impl_file_sync!();
+
         /// Performs a TRIM operation using the `FITRIM` `ioctl`.
         #[cfg(target_os = "linux")]
         fn trim(&self, offset: u64, length: u64) -> io::Result<u64> {
@@ -83,6 +104,8 @@ mod unix {
         fn write_all_at(&self, buf: &[u8], offset: u64) -> Option<io::Result<()>> {
             Some(FileExt::write_all_at(*self, buf, offset))
         }
+
+        impl_file_sync!();
 
         /// Performs a TRIM operation using the `FITRIM` `ioctl`.
         #[cfg(target_os = "linux")]
@@ -162,8 +185,14 @@ mod unix {
 
     impl Read for File {}
     impl Read for &File {}
-    impl ReadWrite for File {}
-    impl ReadWrite for &File {}
+
+    impl ReadWrite for File {
+        impl_file_sync!();
+    }
+
+    impl ReadWrite for &File {
+        impl_file_sync!();
+    }
 }
 
 // TODO(mdlayher): it seems like the following blanket implementations for our

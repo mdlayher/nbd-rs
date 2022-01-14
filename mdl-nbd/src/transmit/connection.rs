@@ -70,7 +70,7 @@ where
 
     fn flush(&mut self) -> Result<()> {
         match self {
-            Self::ReadWrite(rw) => Ok(rw.flush()?),
+            Self::ReadWrite(rw) => Ok(rw.sync()?),
             Self::Read(..) => Err(Error::Unsupported),
         }
     }
