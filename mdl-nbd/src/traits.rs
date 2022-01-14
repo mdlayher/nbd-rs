@@ -158,9 +158,20 @@ mod unix {
     impl ReadWrite for &File {}
 }
 
+// TODO(mdlayher): it seems like the following blanket implementations for our
+// Read and ReadWrite traits would be useful, but we can't specialize for File
+// on UNIX/Linux as we do above if we declare blanket implementations. Find a
+// solution to this problem. In the meantime, we just implement the traits for
+// File and Cursor since those are most likely to be used in practice.
+//
+// impl<T: io::Read + io::Seek> Read for T {}
+// impl<T: Read + io::Write> ReadWrite for T {}
+
 impl<T> Read for Cursor<T> where T: AsRef<[u8]> {}
 
-impl ReadWrite for Cursor<&mut [u8]> {}
-impl ReadWrite for Cursor<&mut Vec<u8>> {}
-impl ReadWrite for Cursor<Vec<u8>> {}
-impl ReadWrite for Cursor<Box<[u8]>> {}
+impl<T> ReadWrite for Cursor<T>
+where
+    T: AsRef<[u8]>,
+    Cursor<T>: io::Write,
+{
+}
