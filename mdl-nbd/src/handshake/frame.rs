@@ -46,6 +46,8 @@ impl Export {
     /// Sets non-default block sizes for the `Export`. The array values are the
     /// minimum, preferred, and maximum block size, respectively.
     pub fn block_size(mut self, block_sizes: [u32; 3]) -> Self {
+        // TODO(mdlayher): validation of sizes in relation to each other
+        // according to the rules in the spec.
         self.block_sizes = block_sizes;
         self
     }
@@ -60,13 +62,26 @@ impl Export {
         self
     }
 
-    /// Marks this `Export` as read-only when negotiating data transmission.
+    /// Produces a read-only `Export`. Write commands are disabled during data
+    /// transmission.
     pub fn readonly(mut self) -> Self {
         self._flags.set(TransmissionFlags::READ_ONLY, true);
         self
     }
 
-    /// Marks this `Export` as being backed by rotational media, such as a
+    /// Enables the use of the Flush command on this `Export`. This option
+    /// should be set when possible for read/write exports to enable durable
+    /// sync of data to disks. However, if the export data is completely stored
+    /// in memory, there is no need for this option.
+    pub fn flush(mut self) -> Self {
+        self._flags.set(
+            TransmissionFlags::SEND_FLUSH | TransmissionFlags::SEND_FUA,
+            true,
+        );
+        self
+    }
+
+    /// Indicates an `Export` is backed by rotational media, such as a
     /// conventional hard drive. This can be used as a hint for clients to
     /// optimize their access patterns.
     pub fn rotational(mut self) -> Self {
@@ -74,8 +89,9 @@ impl Export {
         self
     }
 
-    /// Marks this `Export` as being capable of handling the TRIM command, which
-    /// is used to discard unused bytes on solid-state media.
+    /// Enables the use of the TRIM command on this `Export`. This option should
+    /// be set when possible for read/write exports backed by solid-state media,
+    /// so unused bytes can be efficiently discarded by the disk.
     pub fn trim(mut self) -> Self {
         self._flags.set(TransmissionFlags::SEND_TRIM, true);
         self
@@ -208,7 +224,7 @@ impl Default for TransmissionFlags {
     /// Returns the default transmission flags this server supports for all
     /// exports regardless of client configuration.
     fn default() -> Self {
-        TransmissionFlags::HAS_FLAGS | TransmissionFlags::SEND_FLUSH | TransmissionFlags::SEND_FUA
+        TransmissionFlags::HAS_FLAGS
     }
 }
 

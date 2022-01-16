@@ -2,6 +2,7 @@ use bytes::BytesMut;
 use log::{debug, error};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::BufWriter;
@@ -30,10 +31,19 @@ pub struct Devices<D> {
 /// export.
 pub type DeviceFn<D> = Box<dyn Fn(&str) -> crate::Result<D> + Send + Sync>;
 
+// TODO(mdlayher): make a more general Devices builder.
+
 impl Devices<File> {
     /// Constructs a `Devices` using `path` to open a local file as the default
     /// export.
     pub fn file(path: &str) -> crate::Result<Self> {
+        let (export, open) = Self::file_export(path)?;
+        debug!("new export: {export}");
+        Ok(Self::new(export, open))
+    }
+
+    /// Produces a file-backed export and function to open that file.
+    fn file_export(path: &str) -> crate::Result<(Export, DeviceFn<File>)> {
         // TODO(mdlayher): the usual approach for file names is AsRef<Path> but
         // we need to use the string in multiple places. Look into this.
 
@@ -47,20 +57,16 @@ impl Devices<File> {
 
         let readonly = metadata.permissions().readonly();
 
-        let export = {
-            // Construct the export using file metadata.
-            //
-            // TODO(mdlayher): block size?
-            let export = Export::new(path, metadata.len()).description("file export");
-            if !readonly {
-                export
-            } else {
-                export.readonly()
-            }
-        };
+        // Construct the export using file metadata.
+        //
+        // TODO(mdlayher): block size?
+        let export = Export::new(path, metadata.len())
+            .description("file export")
+            .flush();
 
-        debug!("new export: {export}");
-        Ok(Self::new(export, Self::file_open(readonly)))
+        let export = if !readonly { export } else { export.readonly() };
+
+        Ok((export, Self::file_open(readonly)))
     }
 
     /// Produces a `DeviceFn<File>` which obeys the file's write restrictions.
@@ -79,6 +85,17 @@ impl Devices<File> {
                 Err("can only export regular files".into())
             }
         })
+    }
+}
+
+impl Devices<Cursor<Vec<u8>>> {
+    /// Constructs an in-memory export of the specified `size` in bytes which
+    /// will be freed whenever a client disconnects.
+    pub fn memory(size: usize) -> Self {
+        Self::new(
+            Export::new("memory", size as u64),
+            Box::new(move |_| Ok(Cursor::new(vec![0u8; size]))),
+        )
     }
 }
 

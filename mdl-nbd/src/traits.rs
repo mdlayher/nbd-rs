@@ -28,12 +28,11 @@ pub trait ReadWrite: Read + io::Write {
         None
     }
 
-    /// Devices may optionally support a durable sync operation, such as `fsync`
-    /// on Linux files. By default, this method calls `io::Write::flush(self)`.
+    /// Devices may optionally support a durable sync operation for Flush, such
+    /// as `fsync` on Linux files. By default, this method returns an
+    /// unsupported operation error.
     fn sync(&mut self) -> io::Result<()> {
-        // TODO(mdlayher): consider Option pattern as above if durable sync
-        // cannot be honored, such as with a Cursor.
-        io::Write::flush(self)
+        Err(io::ErrorKind::Unsupported.into())
     }
 
     /// Devices may optionally support the TRIM operation. By default, this
@@ -90,13 +89,6 @@ mod unix {
         }
 
         impl_file_sync!();
-
-        /// Performs a TRIM operation using the `FITRIM` `ioctl`.
-        #[cfg(target_os = "linux")]
-        fn trim(&self, offset: u64, length: u64) -> io::Result<u64> {
-            use std::os::unix::io::AsRawFd;
-            linux::ioctl_fitrim(self.as_raw_fd(), offset, length)
-        }
     }
 
     impl ReadWrite for &File {
@@ -106,59 +98,15 @@ mod unix {
         }
 
         impl_file_sync!();
-
-        /// Performs a TRIM operation using the `FITRIM` `ioctl`.
-        #[cfg(target_os = "linux")]
-        fn trim(&self, offset: u64, length: u64) -> io::Result<u64> {
-            use std::os::unix::io::AsRawFd;
-            linux::ioctl_fitrim(self.as_raw_fd(), offset, length)
-        }
     }
 
     // Linux only: enable TRIM support.
 
     #[cfg(target_os = "linux")]
     mod linux {
-        use log::debug;
-        use nix::errno::Errno;
-        use std::io;
-
-        /// Invokes the FITRIM ioctl on `fd` starting at `offset` for `length`
-        /// bytes. The `minlen` field on `fstrim_range` is always set to 0.
-        pub fn ioctl_fitrim(fd: i32, offset: u64, length: u64) -> io::Result<u64> {
-            // "Any extent less than minlen bytes will be ignored in this
-            // process. The operation can be run over the entire device by
-            // setting start to zero and len to ULLONG_MAX."
-            //
-            // Reference: https://lwn.net/Articles/417809/.
-            let data = _fstrim_range {
-                start: offset,
-                len: length,
-                // Trim everything.
-                minlen: 0,
-            };
-
-            // TODO(mdlayher): test with a real SSD to confirm these return and
-            // error values.
-
-            debug!("trim  in: {data:?}");
-            let res = unsafe { _ioctl_fitrim(fd, &data) };
-            debug!("trim out: {res:?} {data:?}");
-
-            match res {
-                // The number of bytes trimmed.
-                Ok(_) => Ok(data.len),
-                // Permission denied.
-                Err(Errno::EPERM) => Err(io::ErrorKind::PermissionDenied.into()),
-                // This device, filesystem, or mounted filesystem configuration
-                // does not support TRIM.
-                Err(Errno::ENOTTY) | Err(Errno::EOPNOTSUPP) | Err(Errno::EROFS) => {
-                    Err(io::ErrorKind::Unsupported.into())
-                }
-                // Fallback.
-                Err(_) => Err(io::ErrorKind::InvalidInput.into()),
-            }
-        }
+        // TODO(mdlayher): it would appear FITRIM isn't the right choice. The
+        // nbd-server source uses fallocate for files and ioctl BLKDISCARD for
+        // devices. For now, do nothing.
 
         /// The raw Rust equivalent to a C `fstrim_range` struct.
         #[allow(non_camel_case_types)]
@@ -172,6 +120,13 @@ mod unix {
         // Equivalent to Linux's FITRIM ioctl:
         // #define FITRIM _IOWR('X', 121, struct fstrim_range)
         nix::ioctl_write_ptr!(_ioctl_fitrim, 'X', 121, _fstrim_range);
+
+        // #define BLKDISCARD _IO(0x12,119)
+        nix::ioctl_write_ptr_bad!(
+            _ioctl_blkdiscard,
+            nix::request_code_none!(0x12, 119),
+            [u64; 2]
+        );
     }
 }
 
