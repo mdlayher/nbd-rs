@@ -97,9 +97,9 @@ where
                 };
 
                 if req.flags.contains(CommandFlags::FUA) {
-                    // Client wants us to flush the write buffer before replying
-                    // to its request.
-                    rw.flush()?;
+                    // Client wants us to flush to non-volatile media before
+                    // replying to its request.
+                    rw.sync()?;
                 }
 
                 Ok(())
