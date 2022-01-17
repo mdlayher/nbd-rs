@@ -1,12 +1,13 @@
-use bytes::BytesMut;
-use std::io;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use bytes::{Buf, BytesMut};
+use std::io::{self, Cursor};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
 // TODO(mdlayher): try to avoid usage of *.
+use crate::frame::Error;
 use crate::handshake::frame::{Frame as HandshakeFrame, *};
 use crate::handshake::RawConnection;
-use crate::transmit::Frame as TransmitFrame;
+use crate::transmit::{CommandFlags, Frame as TransmitFrame, Header};
 use crate::Stream;
 
 /// An NBD client connection which can query information and perform I/O
@@ -161,9 +162,10 @@ impl<S: Stream> Client<S> {
 /// This type is constructed by using the [`Client`]'s `go` method.
 pub struct ClientIoConnection<S> {
     stream: BufWriter<S>,
-    _buffer: BytesMut,
+    buffer: BytesMut,
     _flags: TransmissionFlags,
     handle: u64,
+    offset: u64,
 }
 
 impl<S: Stream> ClientIoConnection<S> {
@@ -172,11 +174,12 @@ impl<S: Stream> ClientIoConnection<S> {
     pub(crate) fn new(stream: BufWriter<S>, buffer: BytesMut, flags: TransmissionFlags) -> Self {
         Self {
             stream,
-            _buffer: buffer,
+            buffer,
             // TODO(mdlayher): pick apart and adjust capabilities such as for
             // read-only exports.
             _flags: flags,
             handle: 0,
+            offset: 0,
         }
     }
 
@@ -186,6 +189,175 @@ impl<S: Stream> ClientIoConnection<S> {
         self.write_frame(TransmitFrame::Disconnect).await?;
         self.stream.shutdown().await?;
         Ok(())
+    }
+
+    pub async fn read(&mut self, buf: &mut [u8]) -> crate::Result<usize> {
+        let n = self.read_at(self.offset, buf).await?;
+        self.offset += n as u64;
+        Ok(n)
+    }
+
+    // TODO(mdlayher): synchronous io::Read and io::Seek.
+
+    pub async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> crate::Result<usize> {
+        self.write_frame(TransmitFrame::ReadRequest(Header {
+            flags: CommandFlags::empty(),
+            offset,
+            length: buf.len(),
+        }))
+        .await?;
+
+        let size = self
+            .read_frame_mut(buf, &|frame| {
+                dbg!(frame);
+            })
+            .await?;
+
+        Ok(size)
+    }
+
+    pub async fn write(&mut self, buf: &[u8]) -> crate::Result<usize> {
+        let n = self.write_at(self.offset, buf).await?;
+        self.offset += n as u64;
+        Ok(n)
+    }
+
+    pub async fn write_at(&mut self, offset: u64, buf: &[u8]) -> crate::Result<usize> {
+        self.write_frame(TransmitFrame::WriteRequest(
+            dbg!(Header {
+                flags: CommandFlags::FUA,
+                offset,
+                length: buf.len(),
+            }),
+            buf,
+        ))
+        .await?;
+
+        self.read_frame(&|frame| {
+            dbg!(frame);
+        })
+        .await?;
+
+        dbg!("write done");
+        Ok(buf.len())
+    }
+
+    // TODO(mdlayher): move to transmit::ClientIoConnection or similar.
+
+    /// Serves I/O requests on the connection until the client disconnects or an
+    /// error occurs.
+    async fn read_frame<F: Fn(&TransmitFrame)>(&mut self, on_frame: &F) -> crate::Result<()> {
+        loop {
+            if self.next_frame(on_frame).await?.is_some() {
+                // Frame handled, try the next one.
+                return Ok(());
+            }
+
+            // There is not enough buffered data to read a frame. Attempt to
+            // read more data from the socket. 0 indicates "end of stream".
+            if self.stream.read_buf(&mut self.buffer).await? == 0 {
+                // The remote closed the connection.
+                if self.buffer.is_empty() {
+                    return Ok(());
+                } else {
+                    return Err("connection reset by peer".into());
+                }
+            }
+        }
+    }
+
+    /// Try to handle a single I/O operation but also terminate early with an
+    /// incomplete error if we need to read more data from the stream.
+    async fn next_frame<F: Fn(&TransmitFrame)>(
+        &mut self,
+        on_frame: &F,
+    ) -> crate::Result<Option<()>> {
+        let mut buf = Cursor::new(&self.buffer[..]);
+        match TransmitFrame::check(&mut buf, Some(0)) {
+            Ok((mtype, io_type)) => {
+                // TODO(mdlayher): we only expect simple replies. Verify this
+                // magic type and consider erroring out.
+
+                // Found a complete Frame, parse it, handle any associated I/O
+                // and client responses.
+                let len = buf.position() as usize;
+                buf.set_position(0);
+
+                {
+                    let (req, _handle) = TransmitFrame::parse(&mut buf, mtype, io_type)?;
+                    on_frame(&req);
+                }
+
+                // Now advance the buffer beyond the current cursor for the next
+                // operation.
+                self.buffer.advance(len);
+                Ok(Some(()))
+            }
+            // Not enough data for an entire Frame.
+            Err(Error::Incomplete) => Ok(None),
+            // Failed to parse.
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Serves I/O requests on the connection until the client disconnects or an
+    /// error occurs.
+    async fn read_frame_mut<F: Fn(&TransmitFrame)>(
+        &mut self,
+        buf: &mut [u8],
+        on_frame: &F,
+    ) -> crate::Result<usize> {
+        loop {
+            if let Some(size) = self.next_frame_mut(buf, on_frame).await? {
+                // Frame handled, try the next one.
+                return Ok(size);
+            }
+
+            // There is not enough buffered data to read a frame. Attempt to
+            // read more data from the socket. 0 indicates "end of stream".
+            if self.stream.read_buf(&mut self.buffer).await? == 0 {
+                // The remote closed the connection.
+                if self.buffer.is_empty() {
+                    return Ok(0);
+                } else {
+                    return Err("connection reset by peer".into());
+                }
+            }
+        }
+    }
+
+    /// Try to handle a single I/O operation but also terminate early with an
+    /// incomplete error if we need to read more data from the stream.
+    async fn next_frame_mut<F: Fn(&TransmitFrame)>(
+        &mut self,
+        read_buf: &mut [u8],
+        on_frame: &F,
+    ) -> crate::Result<Option<usize>> {
+        let mut buf = Cursor::new(&self.buffer[..]);
+        match TransmitFrame::check(&mut buf, Some(read_buf.len())) {
+            Ok((mtype, io_type)) => {
+                // TODO(mdlayher): we only expect simple replies. Verify this
+                // magic type and consider erroring out.
+
+                // Found a complete Frame, parse it, handle any associated I/O
+                // and client responses.
+                let len = buf.position() as usize;
+                buf.set_position(0);
+
+                let (req, _handle) = TransmitFrame::parse(&mut buf, mtype, io_type)?;
+                on_frame(&req);
+                let size = buf.read_exact(read_buf).await?;
+
+                // Now advance the buffer beyond the current cursor for the next
+                // operation.
+                self.buffer.advance(len);
+                Ok(Some(size))
+            }
+            // Not enough data for an entire Frame.
+            Err(Error::Incomplete) => Ok(None),
+            // Failed to parse.
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Writes a single `TransmitFrame` value to the server.

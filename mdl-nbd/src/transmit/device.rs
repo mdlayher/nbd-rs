@@ -99,7 +99,7 @@ where
                 if req.flags.contains(CommandFlags::FUA) {
                     // Client wants us to flush the write buffer before replying
                     // to its request.
-                    rw.flush()?;
+                    dbg!(rw.sync())?;
                 }
 
                 Ok(())

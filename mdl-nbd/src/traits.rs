@@ -85,6 +85,7 @@ mod unix {
     impl ReadWrite for File {
         /// Performs a fused write and seek system call operation.
         fn write_all_at(&self, buf: &[u8], offset: u64) -> Option<io::Result<()>> {
+            dbg!("write all at:", offset, buf);
             Some(FileExt::write_all_at(self, buf, offset))
         }
 
@@ -94,6 +95,7 @@ mod unix {
     impl ReadWrite for &File {
         /// Performs a fused write and seek system call operation.
         fn write_all_at(&self, buf: &[u8], offset: u64) -> Option<io::Result<()>> {
+            dbg!("write all at:", offset, buf);
             Some(FileExt::write_all_at(*self, buf, offset))
         }
 

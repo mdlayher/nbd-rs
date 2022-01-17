@@ -8,4 +8,4 @@ mod device;
 pub(crate) use device::Device;
 
 mod frame;
-pub(crate) use frame::{Frame, FrameType};
+pub(crate) use frame::{CommandFlags, Frame, FrameType, Header};
