@@ -23,7 +23,7 @@ where
     RW: ReadWrite,
 {
     /// Handles a single I/O operation `req` with the device buffer `buf`.
-    pub(crate) fn handle_io<'a>(&mut self, req: &'a Frame, buf: &mut [u8]) -> Option<Frame<'a>> {
+    pub(crate) fn handle_io(&mut self, req: Frame, buf: &mut [u8]) -> Option<Frame> {
         match req {
             // No reply.
             Frame::Disconnect => None,
@@ -83,7 +83,7 @@ where
         }
     }
 
-    fn write_all_at(&mut self, req: &Header, buf: &[u8]) -> Result<()> {
+    fn write_all_at(&mut self, req: Header, buf: &[u8]) -> Result<()> {
         match self {
             Self::Read(..) => Err(Error::Unsupported),
             Self::ReadWrite(rw) => {
@@ -114,7 +114,7 @@ where
         }
     }
 
-    fn trim(&mut self, req: &Header) -> Result<()> {
+    fn trim(&mut self, req: Header) -> Result<()> {
         match self {
             Self::Read(..) => Err(Error::Unsupported),
             Self::ReadWrite(rw) => {

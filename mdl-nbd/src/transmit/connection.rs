@@ -79,7 +79,7 @@ where
 
                 {
                     let (req, handle) = Frame::parse(&mut buf, mtype, io_type)?;
-                    if let Some(res) = self.device.handle_io(&req, &mut self.device_buffer) {
+                    if let Some(res) = self.device.handle_io(req, &mut self.device_buffer) {
                         // We have something to write, send it now and flush the
                         // stream. The response frame is aware of how much data
                         // is valid in the device buffer and will slice
