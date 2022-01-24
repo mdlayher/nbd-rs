@@ -68,15 +68,17 @@ where
     /// incomplete error if we need to read more data from the stream.
     async fn next_io(&mut self) -> crate::Result<Option<()>> {
         let mut buf = Cursor::new(&self.stream_buffer[..]);
-        match Frame::check(&mut buf) {
-            Ok(_) => {
+
+        // buf_length always None; no need for server to parse response bodies.
+        match Frame::check(&mut buf, None) {
+            Ok((mtype, io_type)) => {
                 // Found a complete Frame, parse it, handle any associated I/O
                 // and client responses.
                 let len = buf.position() as usize;
                 buf.set_position(0);
 
                 {
-                    let (req, handle) = Frame::parse(&mut buf)?;
+                    let (req, handle) = Frame::parse(&mut buf, mtype, io_type)?;
                     if let Some(res) = self.device.handle_io(&req, &mut self.device_buffer) {
                         // We have something to write, send it now and flush the
                         // stream. The response frame is aware of how much data

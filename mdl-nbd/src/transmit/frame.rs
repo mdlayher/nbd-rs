@@ -18,7 +18,7 @@ pub enum FrameType {
 
 /// Possible error number values for I/O requests.
 #[repr(u32)]
-#[derive(Debug)]
+#[derive(Debug, FromPrimitive)]
 pub(crate) enum Errno {
     None = NBD_OK,
     Permission = NBD_EPERM,
@@ -75,12 +75,16 @@ pub(crate) enum Frame<'a> {
     // Write operations; WriteResponse is used for all requests.
     FlushRequest(Header),
     TrimRequest(Header),
-    WriteRequest(Header, &'a [u8]),
+    WriteRequest(Header, Data<'a>),
 }
 
 /// An opaque value used by clients and server to denote matching requests and
 /// responses.
 type Handle<'a> = &'a [u8];
+
+/// An opaque value used by clients and servers to carry data trailing a
+/// `Header` in requests and responses.
+type Data<'a> = &'a [u8];
 
 /// The header for each data transmission operation.
 #[derive(Debug)]
@@ -90,9 +94,17 @@ pub(crate) struct Header {
     pub(crate) length: usize,
 }
 
+/// The magic value of an I/O operation as specified by the protocol.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, FromPrimitive, PartialEq)]
+pub(crate) enum MagicType {
+    Request = NBD_REQUEST_MAGIC,
+    SimpleReply = NBD_SIMPLE_REPLY_MAGIC,
+}
+
 /// The type of an I/O operation as specified by the protocol.
 #[repr(u16)]
-#[derive(Debug, FromPrimitive)]
+#[derive(Copy, Clone, Debug, FromPrimitive, PartialEq)]
 pub(crate) enum IoType {
     Disconnect = NBD_CMD_DISC,
     Flush = NBD_CMD_FLUSH,
@@ -110,75 +122,115 @@ bitflags! {
 
 impl<'a> Frame<'a> {
     /// Determines if enough data is available to parse a `Frame`, then returns
-    /// the length of that
-    pub(crate) fn check(src: &'a mut Cursor<&[u8]>) -> Result<()> {
-        // Check for proper magic.
-        if get_u32(src)? != NBD_REQUEST_MAGIC {
-            return Err(Error::TransmitProtocol(FrameType::Request));
-        }
+    /// the expected magic and I/O type values of that frame. `buf_length` must
+    /// be `Some(n)` for parsing client read responses which contain a trailing
+    /// byte buffer with no other length indicator.
+    pub(crate) fn check(
+        src: &'a mut Cursor<&[u8]>,
+        buf_length: Option<usize>,
+    ) -> Result<(MagicType, Option<IoType>)> {
+        // Check for magic value.
+        let mtype = FromPrimitive::from_u32(get_u32(src)?)
+            .ok_or(Error::TransmitProtocol(FrameType::Request))?;
 
-        // Skip flags, check I/O type.
-        skip(src, 2)?;
-        let io_type = get_u16(src)?;
+        match mtype {
+            // Client request path.
+            MagicType::Request => {
+                // buf_length only applies to replies.
+                assert!(buf_length.is_none());
 
-        // Skip handle, offset.
-        skip(src, 16)?;
+                // Skip flags, check I/O type.
+                skip(src, 2)?;
+                let io_type = FromPrimitive::from_u16(get_u16(src)?)
+                    .ok_or(Error::TransmitProtocol(FrameType::Request))?;
 
-        // Length is applicable only to writes.
-        let length = get_u32(src)? as usize;
+                // Skip handle, offset.
+                skip(src, 16)?;
 
-        match FromPrimitive::from_u16(io_type) {
-            // Nothing to do.
-            Some(IoType::Disconnect)
-            | Some(IoType::Flush)
-            | Some(IoType::Read)
-            | Some(IoType::Trim) => Ok(()),
-            // Make sure we can consume a full write.
-            Some(IoType::Write) => skip(src, length),
-            None => Err(Error::TransmitProtocol(FrameType::Request)),
+                // Length is applicable only to reads and writes.
+                let length = get_u32(src)? as usize;
+
+                if io_type == IoType::Write {
+                    skip(src, length)?;
+                }
+
+                Ok((mtype, Some(io_type)))
+            }
+            // Server simple reply path.
+            MagicType::SimpleReply => {
+                // Skip errno, handle, and trailing body byte count stored in
+                // buf_length.
+                skip(src, 12)?;
+                skip(src, buf_length.unwrap())?;
+
+                Ok((mtype, None))
+            }
         }
     }
 
-    /// Parses the next I/O operation `Frame` from `src`.
-    pub(crate) fn parse(src: &'a mut Cursor<&[u8]>) -> Result<(Frame<'a>, Handle<'a>)> {
-        if get_u32(src)? != NBD_REQUEST_MAGIC {
-            return Err(Error::TransmitProtocol(FrameType::Request));
-        }
+    /// Parses the next I/O operation `Frame` from `src` using the expected
+    /// message type and I/O type values to assert the cursor is in the correct
+    /// position after frame check.
+    pub(crate) fn parse(
+        src: &'a mut Cursor<&[u8]>,
+        mtype: MagicType,
+        io_type: Option<IoType>,
+    ) -> Result<(Frame<'a>, Handle<'a>)> {
+        // Assert we're aligned properly by verifying matching magic from check.
+        assert_eq!(get_u32(src)?, mtype as u32);
 
-        let flags = CommandFlags::from_bits(get_u16(src)?).unwrap_or_else(CommandFlags::empty);
-        let io_type = get_u16(src)?;
+        match mtype {
+            // Client request path.
+            MagicType::Request => {
+                let flags =
+                    CommandFlags::from_bits(get_u16(src)?).unwrap_or_else(CommandFlags::empty);
 
-        // Borrow opaque u64 Handle for use in reply, but do not decode it.
-        let pos = src.position() as usize;
-        let handle = &src.get_ref()[pos..pos + 8];
-        src.advance(8);
+                // Assert we're aligned properly by verifying matching I/O type
+                // from check. This path must have Some(IoType).
+                let io_type = io_type.unwrap();
+                assert_eq!(get_u16(src)?, io_type as u16);
 
-        let offset = get_u64(src)?;
-        let length = get_u32(src)? as usize;
+                // Borrow opaque u64 Handle for use in reply, but do not decode it.
+                let handle = get_handle(src);
 
-        let header = Header {
-            flags,
-            offset,
-            length,
-        };
+                let offset = get_u64(src)?;
+                let length = get_u32(src)? as usize;
 
-        let frame = match FromPrimitive::from_u16(io_type) {
-            Some(IoType::Disconnect) => Frame::Disconnect,
-            Some(IoType::Flush) => Frame::FlushRequest(header),
-            Some(IoType::Read) => Frame::ReadRequest(header),
-            Some(IoType::Trim) => Frame::TrimRequest(header),
-            Some(IoType::Write) => {
-                // Write buffer lies beyond the end of the header, borrow it so
-                // we can write it to the device.
-                let pos = src.position() as usize;
-                let buf = &src.get_ref()[pos..pos + length];
+                let header = Header {
+                    flags,
+                    offset,
+                    length,
+                };
 
-                Frame::WriteRequest(header, buf)
+                let frame = match io_type {
+                    IoType::Disconnect => Frame::Disconnect,
+                    IoType::Flush => Frame::FlushRequest(header),
+                    IoType::Read => Frame::ReadRequest(header),
+                    IoType::Trim => Frame::TrimRequest(header),
+                    IoType::Write => {
+                        // Write buffer lies beyond the end of the header,
+                        // borrow it so we can write it to the device.
+                        let pos = src.position() as usize;
+                        let buf = &src.get_ref()[pos..pos + length];
+
+                        Frame::WriteRequest(header, buf)
+                    }
+                };
+
+                Ok((frame, handle))
             }
-            None => return Err(Error::TransmitProtocol(FrameType::Request)),
-        };
+            // Server simple reply path.
+            MagicType::SimpleReply => {
+                // io_type only applies to requests.
+                assert!(io_type.is_none());
 
-        Ok((frame, handle))
+                // Treat unknown errors as EINVALs.
+                let errno = FromPrimitive::from_u32(get_u32(src)?).unwrap_or(Errno::Invalid);
+                let handle = get_handle(src);
+
+                Ok((Frame::ErrorResponse(errno), handle))
+            }
+        }
     }
 
     /// Writes the current `Frame` out to `dst` as a response to the I/O
@@ -212,6 +264,30 @@ impl<'a> Frame<'a> {
 
                 Ok(Some(()))
             }
+            Self::ReadRequest(header) => {
+                dst.write_u32(NBD_REQUEST_MAGIC).await?;
+                dst.write_u16(header.flags.bits()).await?;
+                dst.write_u16(IoType::Read as u16).await?;
+                dst.write_all(handle).await?;
+
+                dst.write_u64(header.offset).await?;
+                dst.write_u32(header.length as u32).await?;
+
+                Ok(Some(()))
+            }
+            Self::WriteRequest(header, body) => {
+                dst.write_u32(NBD_REQUEST_MAGIC).await?;
+                dst.write_u16(header.flags.bits()).await?;
+                dst.write_u16(IoType::Write as u16).await?;
+                dst.write_all(handle).await?;
+
+                dst.write_u64(header.offset).await?;
+                dst.write_u32(header.length as u32).await?;
+
+                dst.write_all(body).await?;
+
+                Ok(Some(()))
+            }
             Self::ReadResponse(length) => {
                 dst.write_u32(NBD_SIMPLE_REPLY_MAGIC).await?;
                 dst.write_u32(NBD_OK).await?;
@@ -221,10 +297,18 @@ impl<'a> Frame<'a> {
                 Ok(Some(()))
             }
             // Cannot handle writing other I/O responses yet.
-            Self::FlushRequest(..)
-            | Self::ReadRequest(..)
-            | Self::TrimRequest(..)
-            | Self::WriteRequest(..) => todo!(),
+            Self::FlushRequest(..) | Self::TrimRequest(..) => todo!(),
         }
     }
+}
+
+// Returns a `Handle` from `src` and advances the `Cursor`.
+fn get_handle<'a>(src: &mut Cursor<&'a [u8]>) -> Handle<'a> {
+    // Borrow opaque u64 Handle for use in replies. We don't decode it because
+    // the integer value is meaningless to the server since it'll just be
+    // written directly back to the client.
+    let pos = src.position() as usize;
+    let handle = &src.get_ref()[pos..pos + 8];
+    src.advance(8);
+    handle
 }
